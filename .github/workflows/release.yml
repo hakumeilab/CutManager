@@ -38,8 +38,16 @@ jobs:
         id: metadata
         shell: pwsh
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $version = .\.venv\Scripts\python.exe .\scripts\release_metadata.py version
+          $versionFile = Join-Path $PWD 'cutmanager\__init__.py'
+          $changelogFile = Join-Path $PWD 'CHANGELOG.md'
+
+          $versionContent = Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8
+          $versionMatch = [regex]::Match($versionContent, '__version__\s*=\s*"(?<version>[^"]+)"')
+          if (-not $versionMatch.Success) {
+            throw "Version could not be resolved from cutmanager/__init__.py."
+          }
+
+          $version = $versionMatch.Groups['version'].Value.Trim()
           if (-not $version) {
             throw "Version could not be resolved."
           }
@@ -49,11 +57,30 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match version $version."
           }
 
-          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
-          .\.venv\Scripts\python.exe .\scripts\release_metadata.py notes $version | Out-File -FilePath $notesPath -Encoding utf8
+          $changelogContent = Get-Content -LiteralPath $changelogFile -Raw -Encoding UTF8
+          $headerPattern = "(?m)^##\s+$([regex]::Escape($version))(?:\s+-\s+.+)?\s*$"
+          $headerMatch = [regex]::Match($changelogContent, $headerPattern)
+          if (-not $headerMatch.Success) {
+            throw "Version $version was not found in CHANGELOG.md."
+          }
 
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+          $remainingContent = $changelogContent.Substring($headerMatch.Index + $headerMatch.Length)
+          $nextHeaderMatch = [regex]::Match($remainingContent, '(?m)^##\s+')
+          if ($nextHeaderMatch.Success) {
+            $notes = $remainingContent.Substring(0, $nextHeaderMatch.Index).Trim()
+          } else {
+            $notes = $remainingContent.Trim()
+          }
+
+          if (-not $notes) {
+            throw "CHANGELOG.md entry for version $version is empty."
+          }
+
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
+
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "notes_path=$notesPath"
 
       - name: Build release assets
         shell: pwsh

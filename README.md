@@ -180,11 +180,40 @@ private リポジトリのまま運用する場合は、別途認証付き更新
 
 ### 更新用リリースの作り方
 
-1. `pyside6-deploy` で `standalone` ビルドを作ります。
-2. 出力された配布フォルダー一式を zip にまとめます。
-3. GitHub Releases で新しいタグを作ります。
-4. その Release に zip か installer の `.exe` を asset として添付します。
-5. 配布版の CutManager で `ヘルプ > 更新を確認` を実行します。
+通常は GitHub Actions に任せます。  
+`v*` タグを push すると `.github/workflows/release.yml` が走り、
+Windows ビルド、zip 生成、SHA-256 生成、GitHub Release の作成まで自動で行います。
+
+### 自動リリース手順
+
+1. `cutmanager/__init__.py` の `__version__` を更新します。
+2. `CHANGELOG.md` に同じバージョンの項目を追加します。
+3. 必要なら手元で `build_release.ps1` を実行して事前確認します。
+4. 変更を commit して `main` に push します。
+5. `v<version>` 形式のタグを作って push します。
+
+```powershell
+git add cutmanager/__init__.py CHANGELOG.md README.md .github/workflows/release.yml scripts/release_metadata.py
+git commit -m "Release v0.3.0"
+git push origin main
+git tag -a v0.3.0 -m "Release v0.3.0"
+git push origin v0.3.0
+```
+
+workflow 側では次を検証します。
+
+- タグ名と `__version__` が一致していること
+- `CHANGELOG.md` にそのバージョンの項目があること
+
+問題がなければ、Release 名 `CutManager <version>` で GitHub Release が作成され、
+以下の asset が自動で添付されます。
+
+- `dist\CutManager-<version>-windows-standalone.zip`
+- `dist\CutManager-<version>-windows-standalone.sha256.txt`
+
+既存タグで workflow を再実行した場合は、同じ Release を更新して asset を上書きします。
+
+### 手動で事前確認したい場合
 
 手元でまとめて作る場合は、リポジトリ直下の `build_release.ps1` を使うと
 `standalone` ビルド、配布 zip、SHA-256 ファイルの生成まで一括で実行できます。

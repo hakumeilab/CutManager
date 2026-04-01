@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create virtual environment
+        shell: pwsh
+        run: python -m venv .venv
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+      - name: Resolve release metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = .\.venv\Scripts\python.exe .\scripts\release_metadata.py version
+          if (-not $version) {
+            throw "Version could not be resolved."
+          }
+
+          $expectedTag = "v$version"
+          if ("${{ github.ref_name }}" -ne $expectedTag) {
+            throw "Tag ${{ github.ref_name }} does not match version $version."
+          }
+
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          .\.venv\Scripts\python.exe .\scripts\release_metadata.py notes $version | Out-File -FilePath $notesPath -Encoding utf8
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+
+      - name: Build release assets
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          .\build_release.ps1
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tag = "${{ github.ref_name }}"
+          $version = "${{ steps.metadata.outputs.version }}"
+          $notesPath = "${{ steps.metadata.outputs.notes_path }}"
+          $zipPath = "dist/CutManager-$version-windows-standalone.zip"
+          $hashPath = "dist/CutManager-$version-windows-standalone.sha256.txt"
+
+          if (-not (Test-Path -LiteralPath $zipPath)) {
+            throw "Release archive was not found: $zipPath"
+          }
+
+          if (-not (Test-Path -LiteralPath $hashPath)) {
+            throw "Release checksum was not found: $hashPath"
+          }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zipPath $hashPath --clobber
+            gh release edit $tag --title "CutManager $version" --notes-file $notesPath
+            exit $LASTEXITCODE
+          }
+
+          gh release create $tag $zipPath $hashPath --title "CutManager $version" --notes-file $notesPath

@@ -6,9 +6,11 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = $PSScriptRoot
 $versionFile = Join-Path $repoRoot "cutmanager\__init__.py"
+$specTemplatePath = Join-Path $repoRoot "pysidedeploy.spec"
 $pythonExe = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $deployExe = Join-Path $repoRoot ".venv\Scripts\pyside6-deploy.exe"
 $distDir = Join-Path $repoRoot "dist"
+$defaultIconPath = Join-Path $repoRoot ".venv\Lib\site-packages\PySide6\scripts\deploy_lib\pyside_icon.ico"
 
 $versionMatch = Select-String -Path $versionFile -Pattern '__version__ = "(?<version>[^"]+)"'
 if (-not $versionMatch) {
@@ -27,6 +29,35 @@ if (-not (Test-Path -LiteralPath $deployExe)) {
     throw "pyside6-deploy.exe was not found: $deployExe"
 }
 
+if (-not (Test-Path -LiteralPath $specTemplatePath)) {
+    throw "Deploy spec was not found: $specTemplatePath"
+}
+
+function Set-SpecValue {
+    param(
+        [string[]]$Lines,
+        [string]$Section,
+        [string]$Key,
+        [string]$Value
+    )
+
+    $inSection = $false
+    for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
+        $trimmedLine = $Lines[$lineIndex].Trim()
+        if ($trimmedLine -match '^\[(?<name>[^\]]+)\]$') {
+            $inSection = $Matches["name"] -eq $Section
+            continue
+        }
+
+        if ($inSection -and $trimmedLine -match "^$([regex]::Escape($Key))\s*=") {
+            $Lines[$lineIndex] = "{0} = {1}" -f $Key, $Value
+            return $Lines
+        }
+    }
+
+    throw "Key '$Key' in section '$Section' was not found in $specTemplatePath."
+}
+
 Push-Location $repoRoot
 try {
     if ($InstallDependencies) {
@@ -36,7 +67,35 @@ try {
         }
     }
 
-    & $deployExe -c pysidedeploy.spec -f
+    $tempSpecPath = Join-Path $env:TEMP "CutManager-release-$version.spec"
+    $specContent = Get-Content -LiteralPath $specTemplatePath
+    $normalizedIconPath = if (Test-Path -LiteralPath $defaultIconPath) { $defaultIconPath } else { "" }
+    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "title" -Value "CutManager"
+    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "project_dir" -Value "."
+    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "input_file" -Value "main.py"
+    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "exec_directory" -Value "."
+    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "icon" -Value $normalizedIconPath
+    $specContent = Set-SpecValue -Lines $specContent -Section "python" -Key "python_path" -Value $pythonExe
+    $specContent = Set-SpecValue -Lines $specContent -Section "nuitka" -Key "mode" -Value "onefile"
+    Set-Content -LiteralPath $tempSpecPath -Value $specContent -Encoding ASCII
+
+    $candidateCleanupPaths = @(
+        (Join-Path $repoRoot "CutManager.exe"),
+        (Join-Path $repoRoot "main.exe"),
+        (Join-Path $repoRoot "deployment\CutManager.exe"),
+        (Join-Path $repoRoot "deployment\main.exe"),
+        (Join-Path $repoRoot "CutManager.dist\CutManager.exe"),
+        (Join-Path $repoRoot "CutManager.dist\main.exe"),
+        (Join-Path $repoRoot "main.dist\main.exe")
+    )
+
+    foreach ($cleanupPath in $candidateCleanupPaths) {
+        if (Test-Path -LiteralPath $cleanupPath) {
+            Remove-Item -LiteralPath $cleanupPath -Force
+        }
+    }
+
+    & $deployExe -c $tempSpecPath -f
     if ($LASTEXITCODE -ne 0) {
         throw "pyside6-deploy failed with exit code $LASTEXITCODE."
     }
@@ -95,5 +154,8 @@ try {
     Write-Host "SHA256  : $hashPath"
 }
 finally {
+    if ($tempSpecPath -and (Test-Path -LiteralPath $tempSpecPath)) {
+        Remove-Item -LiteralPath $tempSpecPath -Force
+    }
     Pop-Location
 }

@@ -16,12 +16,12 @@ exec_directory = .
 project_file = 
 
 # application icon
-icon = D:\Documents\GitHub\CutManager\.venv\Lib\site-packages\PySide6\scripts\deploy_lib\pyside_icon.ico
+icon =
 
 [python]
 
 # python path
-python_path = d:\Documents\GitHub\CutManager\.venv\Scripts\python.exe
+python_path =
 
 # python packages to install
 packages = Nuitka==2.7.11

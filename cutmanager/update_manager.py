@@ -180,7 +180,7 @@ def prepare_update(downloaded_path: Path) -> PreparedUpdate:
 
     if not can_apply_update_in_place():
         raise UpdateError(
-            "zip 更新の自動適用は、Windows の配布版 CutManager.exe でのみ使用できます。"
+            "zip 更新の自動適用は、Windows の配布版でのみ使用できます。"
         )
 
     current_executable = Path(sys.executable).resolve()
@@ -216,7 +216,13 @@ def prepare_update(downloaded_path: Path) -> PreparedUpdate:
 
 
 def can_apply_update_in_place() -> bool:
-    return sys.platform.startswith("win") and bool(getattr(sys, "frozen", False))
+    return sys.platform.startswith("win") and _is_packaged_runtime()
+
+
+def _is_packaged_runtime() -> bool:
+    if bool(getattr(sys, "frozen", False)):
+        return True
+    return "__compiled__" in globals()
 
 
 def normalize_version(value: str) -> str:

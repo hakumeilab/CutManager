@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDir, QPoint, QSettings, QTimer, Qt
-from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtCore import QDate, QDir, QPoint, QProcess, QSettings, QThread, QTimer, Qt, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -35,6 +36,18 @@ from .history import HistoryManager
 from .model import CutTableModel
 from .proxy import CutFilterProxyModel
 from .settings_dialog import SettingsDialog
+from .update_manager import (
+    RELEASES_PAGE_URL,
+    PreparedUpdate,
+    UpdateAsset,
+    UpdateCheckResult,
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+    UpdateError,
+    can_apply_update_in_place,
+    human_readable_size,
+    prepare_update,
+)
 from .video_import import apply_videos_to_rows
 from .view import CutItemDelegate, CutTableView, FilterHeaderView
 
@@ -53,6 +66,7 @@ class MainWindow(QMainWindow):
         self._sort_column = COLUMN_CUT_NUMBER
         self._sort_order = Qt.SortOrder.AscendingOrder
         self._pending_resort = False
+        self._skip_close_confirmation = False
         self.settings = QSettings("CutManager", "CutManager")
         self.recent_files = self._load_recent_files()
 
@@ -72,7 +86,13 @@ class MainWindow(QMainWindow):
         self.file_menu = QMenu("ファイル", self)
         self.edit_menu = QMenu("編集", self)
         self.sort_menu = QMenu("並べ替え", self)
+        self.help_menu = QMenu("ヘルプ", self)
         self.recent_files_menu = QMenu("最近開いたファイル", self)
+        self._update_check_thread: QThread | None = None
+        self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_download_thread: QThread | None = None
+        self._update_download_worker: UpdateDownloadWorker | None = None
+        self._download_progress_dialog: QProgressDialog | None = None
 
         self.new_action: QAction
         self.open_action: QAction
@@ -88,6 +108,7 @@ class MainWindow(QMainWindow):
         self.delete_row_action: QAction
         self.preferences_action: QAction
         self.restore_default_sort_action: QAction
+        self.check_updates_action: QAction
 
         self.setAcceptDrops(True)
         self.resize(*WINDOW_SIZE)
@@ -154,6 +175,9 @@ class MainWindow(QMainWindow):
         self.restore_default_sort_action.setEnabled(False)
         self.restore_default_sort_action.triggered.connect(self._restore_default_sort)
 
+        self.check_updates_action = QAction("更新を確認", self)
+        self.check_updates_action.triggered.connect(self.check_for_updates)
+
         for action in (
             self.new_action,
             self.open_action,
@@ -169,6 +193,7 @@ class MainWindow(QMainWindow):
             self.delete_row_action,
             self.preferences_action,
             self.restore_default_sort_action,
+            self.check_updates_action,
         ):
             self.addAction(action)
 
@@ -270,10 +295,14 @@ class MainWindow(QMainWindow):
         self.sort_menu.clear()
         self.sort_menu.addAction(self.restore_default_sort_action)
 
+        self.help_menu.clear()
+        self.help_menu.addAction(self.check_updates_action)
+
         self.menuBar().clear()
         self.menuBar().addMenu(self.file_menu)
         self.menuBar().addMenu(self.edit_menu)
         self.menuBar().addMenu(self.sort_menu)
+        self.menuBar().addMenu(self.help_menu)
         self._refresh_recent_files_menu()
 
     def _connect_signals(self) -> None:
@@ -729,6 +758,217 @@ class MainWindow(QMainWindow):
         self._save_undo_limit(new_limit)
         self.statusBar().showMessage(f"アンドゥ履歴数を {new_limit} 回に設定しました。", 4000)
 
+    def check_for_updates(self) -> None:
+        if self._update_check_thread is not None:
+            self.statusBar().showMessage("すでに更新確認を実行中です。", 3000)
+            return
+
+        self.check_updates_action.setEnabled(False)
+        self.statusBar().showMessage("更新を確認しています...", 0)
+
+        self._update_check_thread = QThread(self)
+        self._update_check_worker = UpdateCheckWorker()
+        self._update_check_worker.moveToThread(self._update_check_thread)
+        self._update_check_thread.started.connect(self._update_check_worker.run)
+        self._update_check_worker.finished.connect(self._on_update_check_finished)
+        self._update_check_worker.failed.connect(self._on_update_check_failed)
+        self._update_check_worker.finished.connect(self._update_check_thread.quit)
+        self._update_check_worker.failed.connect(self._update_check_thread.quit)
+        self._update_check_thread.finished.connect(self._cleanup_update_check)
+        self._update_check_thread.start()
+
+    def _on_update_check_finished(self, result: UpdateCheckResult) -> None:
+        self.statusBar().showMessage("更新確認が完了しました。", 4000)
+        self._show_update_check_result(result)
+
+    def _on_update_check_failed(self, message: str) -> None:
+        self.statusBar().showMessage("更新確認に失敗しました。", 5000)
+        QMessageBox.warning(self, "更新確認", message)
+
+    def _cleanup_update_check(self) -> None:
+        if self._update_check_worker is not None:
+            self._update_check_worker.deleteLater()
+        if self._update_check_thread is not None:
+            self._update_check_thread.deleteLater()
+        self._update_check_worker = None
+        self._update_check_thread = None
+        self.check_updates_action.setEnabled(True)
+
+    def _show_update_check_result(self, result: UpdateCheckResult) -> None:
+        release = result.release
+        asset = release.asset
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("更新確認")
+        message_box.setDetailedText(release.body or "リリースノートはありません。")
+
+        info_lines = [
+            f"現在: {result.current_version}",
+            f"最新: {release.version}",
+        ]
+        if release.published_at and release.published_at != "-":
+            info_lines.append(f"公開日: {release.published_at}")
+        if asset is not None:
+            info_lines.append(f"配布ファイル: {asset.name} ({human_readable_size(asset.size)})")
+        else:
+            info_lines.append("配布ファイル: 自動更新に使える asset が見つかりませんでした")
+
+        if result.update_available:
+            message_box.setIcon(QMessageBox.Icon.Information)
+            message_box.setText(f"新しいバージョン {release.version} が見つかりました。")
+            message_box.setInformativeText("\n".join(info_lines))
+            update_button = None
+            if asset is not None:
+                update_label = "ダウンロードして更新"
+                if asset.suffix == ".exe":
+                    update_label = "インストーラーを起動"
+                update_button = message_box.addButton(update_label, QMessageBox.ButtonRole.AcceptRole)
+            open_release_button = message_box.addButton("リリースページを開く", QMessageBox.ButtonRole.ActionRole)
+            close_button = message_box.addButton("閉じる", QMessageBox.ButtonRole.RejectRole)
+            message_box.setDefaultButton(close_button)
+            message_box.exec()
+
+            clicked = message_box.clickedButton()
+            if clicked == update_button and asset is not None:
+                self._download_update_asset(asset)
+            elif clicked == open_release_button:
+                self._open_release_page(release.html_url)
+            return
+
+        message_box.setIcon(QMessageBox.Icon.Information)
+        message_box.setText(f"現在のバージョン {result.current_version} は最新です。")
+        message_box.setInformativeText("\n".join(info_lines))
+        open_release_button = message_box.addButton("リリースページを開く", QMessageBox.ButtonRole.ActionRole)
+        close_button = message_box.addButton("閉じる", QMessageBox.ButtonRole.AcceptRole)
+        message_box.setDefaultButton(close_button)
+        message_box.exec()
+        if message_box.clickedButton() == open_release_button:
+            self._open_release_page(release.html_url)
+
+    def _download_update_asset(self, asset: UpdateAsset) -> None:
+        if self._update_download_thread is not None:
+            self.statusBar().showMessage("更新ファイルをすでにダウンロード中です。", 3000)
+            return
+
+        self._download_progress_dialog = QProgressDialog("更新ファイルをダウンロードしています...", "", 0, 0, self)
+        self._download_progress_dialog.setWindowTitle("更新をダウンロード")
+        self._download_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self._download_progress_dialog.setAutoClose(False)
+        self._download_progress_dialog.setAutoReset(False)
+        self._download_progress_dialog.setMinimumDuration(0)
+        self._download_progress_dialog.setCancelButton(None)
+        self._download_progress_dialog.show()
+
+        self._update_download_thread = QThread(self)
+        self._update_download_worker = UpdateDownloadWorker(asset)
+        self._update_download_worker.moveToThread(self._update_download_thread)
+        self._update_download_thread.started.connect(self._update_download_worker.run)
+        self._update_download_worker.progress.connect(self._on_update_download_progress)
+        self._update_download_worker.finished.connect(self._on_update_download_finished)
+        self._update_download_worker.failed.connect(self._on_update_download_failed)
+        self._update_download_worker.finished.connect(self._update_download_thread.quit)
+        self._update_download_worker.failed.connect(self._update_download_thread.quit)
+        self._update_download_thread.finished.connect(self._cleanup_update_download)
+        self._update_download_thread.start()
+
+    def _on_update_download_progress(self, downloaded_bytes: int, total_bytes: int) -> None:
+        if self._download_progress_dialog is None:
+            return
+
+        if total_bytes > 0:
+            self._download_progress_dialog.setMaximum(total_bytes)
+            self._download_progress_dialog.setValue(min(downloaded_bytes, total_bytes))
+            self._download_progress_dialog.setLabelText(
+                "更新ファイルをダウンロードしています...\n"
+                f"{human_readable_size(downloaded_bytes)} / {human_readable_size(total_bytes)}"
+            )
+        else:
+            self._download_progress_dialog.setMaximum(0)
+            self._download_progress_dialog.setLabelText(
+                "更新ファイルをダウンロードしています...\n"
+                f"{human_readable_size(downloaded_bytes)}"
+            )
+
+    def _on_update_download_finished(self, downloaded_path: str) -> None:
+        if self._download_progress_dialog is not None:
+            self._download_progress_dialog.close()
+
+        path = Path(downloaded_path)
+        try:
+            prepared_update = prepare_update(path)
+        except UpdateError as exc:
+            self.statusBar().showMessage("更新ファイルの準備に失敗しました。", 5000)
+            QMessageBox.warning(
+                self,
+                "更新準備",
+                f"{exc}\n\nダウンロード先:\n{path}",
+            )
+            self._open_local_path(path.parent)
+            return
+
+        if not self._confirm_ready_for_restart(prepared_update):
+            self.statusBar().showMessage("更新は保留しました。", 4000)
+            self._open_local_path(path.parent)
+            return
+
+        try:
+            self._launch_prepared_update(prepared_update)
+        except UpdateError as exc:
+            self._skip_close_confirmation = False
+            self._show_error("更新の起動に失敗しました。", str(exc))
+            self._open_local_path(path.parent)
+
+    def _on_update_download_failed(self, message: str) -> None:
+        if self._download_progress_dialog is not None:
+            self._download_progress_dialog.close()
+        self.statusBar().showMessage("更新ファイルのダウンロードに失敗しました。", 5000)
+        QMessageBox.warning(self, "更新ダウンロード", message)
+
+    def _cleanup_update_download(self) -> None:
+        if self._update_download_worker is not None:
+            self._update_download_worker.deleteLater()
+        if self._update_download_thread is not None:
+            self._update_download_thread.deleteLater()
+        self._update_download_worker = None
+        self._update_download_thread = None
+        if self._download_progress_dialog is not None:
+            self._download_progress_dialog.deleteLater()
+        self._download_progress_dialog = None
+
+    def _confirm_ready_for_restart(self, prepared_update: PreparedUpdate) -> bool:
+        if not self._confirm_discard_or_save():
+            return False
+
+        mode_label = "インストーラーを起動" if prepared_update.mode == "installer" else "更新を適用"
+        answer = QMessageBox.question(
+            self,
+            "更新を適用",
+            f"{mode_label}するため、CutManager を終了します。続行しますか。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _launch_prepared_update(self, prepared_update: PreparedUpdate) -> None:
+        self._skip_close_confirmation = True
+        launch_result = QProcess.startDetached(prepared_update.launch_program, prepared_update.launch_arguments)
+        launched = launch_result[0] if isinstance(launch_result, tuple) else bool(launch_result)
+        if not launched:
+            raise UpdateError("更新プロセスを起動できませんでした。")
+
+        self.statusBar().showMessage("更新を開始します。アプリを終了します。", 4000)
+        QApplication.instance().quit()
+
+    @staticmethod
+    def _open_release_page(url: str | None = None) -> None:
+        target_url = QUrl(str(url or RELEASES_PAGE_URL))
+        if target_url.isValid():
+            QDesktopServices.openUrl(target_url)
+
+    @staticmethod
+    def _open_local_path(path: Path) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self._can_accept_paths(self._extract_drop_paths(event)):
             self._set_drag_feedback(True)
@@ -858,6 +1098,9 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._skip_close_confirmation:
+            event.accept()
+            return
         if self._confirm_discard_or_save():
             event.accept()
             return

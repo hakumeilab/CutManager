@@ -72,6 +72,8 @@ CutManager の画面が開けば次へ進みます。確認できたらアプリ
 .venv\Scripts\pyside6-deploy.exe main.py -f --name CutManager --mode standalone
 ```
 
+この設定では GUI アプリとしてビルドされるため、`CutManager.exe` 起動時にターミナルは開きません。
+
 この処理では以下が起こります。
 
 - `pyside6-deploy` がビルドを開始します。
@@ -183,6 +185,24 @@ private リポジトリのまま運用する場合は、別途認証付き更新
 3. GitHub Releases で新しいタグを作ります。
 4. その Release に zip か installer の `.exe` を asset として添付します。
 5. 配布版の CutManager で `ヘルプ > 更新を確認` を実行します。
+
+手元でまとめて作る場合は、リポジトリ直下の `build_release.ps1` を使うと
+`standalone` ビルド、配布 zip、SHA-256 ファイルの生成まで一括で実行できます。
+
+```powershell
+.\build_release.ps1
+```
+
+依存関係も合わせて入れ直したい場合:
+
+```powershell
+.\build_release.ps1 -InstallDependencies
+```
+
+生成物:
+
+- `dist\CutManager-<version>-windows-standalone.zip`
+- `dist\CutManager-<version>-windows-standalone.sha256.txt`
 
 ## 主な機能
 

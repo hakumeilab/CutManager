@@ -4,12 +4,14 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from cutmanager import __version__
 from cutmanager.main_window import MainWindow
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("CutManager")
+    app.setApplicationVersion(__version__)
 
     window = MainWindow()
     window.show()

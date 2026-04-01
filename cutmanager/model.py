@@ -5,8 +5,16 @@ from dataclasses import dataclass
 import re
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QColor
 
-from .constants import COLUMN_AB_GROUP, COLUMN_CUT_NUMBER, CSV_HEADERS
+from .constants import (
+    COLUMN_AB_GROUP,
+    COLUMN_CUT_NUMBER,
+    COLUMN_STATUS,
+    CSV_HEADERS,
+    STATUS_ROW_BACKGROUND_HEX,
+    STATUS_ROW_FOREGROUND_HEX,
+)
 from .folder_import import make_cut_key
 from .history import HistoryCommand, HistoryManager
 
@@ -82,13 +90,19 @@ class CutTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
 
-        if role not in (Qt.DisplayRole, Qt.EditRole):
-            return None
-
         if self._is_virtual_row(index.row()):
-            return ""
+            return "" if role in (Qt.DisplayRole, Qt.EditRole) else None
 
-        return self._rows[index.row()][index.column()]
+        if role in (Qt.DisplayRole, Qt.EditRole):
+            return self._rows[index.row()][index.column()]
+
+        if role == Qt.BackgroundRole:
+            return self._row_background_color(index.row())
+
+        if role == Qt.ForegroundRole:
+            return self._row_foreground_color(index.row())
+
+        return None
 
     def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
         if role != Qt.EditRole or not index.isValid():
@@ -281,6 +295,7 @@ class CutTableModel(QAbstractTableModel):
     def _apply_cell_changes_internal(self, changes: list[CellChange], *, use_new_values: bool) -> None:
         changed_cells: dict[int, set[int]] = defaultdict(set)
         changed_columns: set[int] = set()
+        rows_requiring_full_repaint: set[int] = set()
 
         for change in changes:
             if not 0 <= change.row < len(self._rows):
@@ -291,17 +306,25 @@ class CutTableModel(QAbstractTableModel):
             self._rows[change.row][change.column] = value
             changed_cells[change.row].add(change.column)
             changed_columns.add(change.column)
+            if change.column == COLUMN_STATUS:
+                rows_requiring_full_repaint.add(change.row)
 
         if not changed_cells:
             return
 
         for row, columns in changed_cells.items():
-            left_column = min(columns)
-            right_column = max(columns)
+            if row in rows_requiring_full_repaint:
+                left_column = 0
+                right_column = len(CSV_HEADERS) - 1
+                roles = [Qt.DisplayRole, Qt.EditRole, Qt.BackgroundRole, Qt.ForegroundRole]
+            else:
+                left_column = min(columns)
+                right_column = max(columns)
+                roles = [Qt.DisplayRole, Qt.EditRole]
             self.dataChanged.emit(
                 self.index(row, left_column),
                 self.index(row, right_column),
-                [Qt.DisplayRole, Qt.EditRole],
+                roles,
             )
 
         self.contentChanged.emit(sorted(changed_columns))
@@ -353,3 +376,13 @@ class CutTableModel(QAbstractTableModel):
             cls._sort_key(row[COLUMN_CUT_NUMBER]),
             cls._sort_key(row[COLUMN_AB_GROUP]),
         )
+
+    def _row_background_color(self, row: int) -> QColor | None:
+        status = self._rows[row][COLUMN_STATUS].strip()
+        color = STATUS_ROW_BACKGROUND_HEX.get(status)
+        return QColor(color) if color else None
+
+    def _row_foreground_color(self, row: int) -> QColor | None:
+        status = self._rows[row][COLUMN_STATUS].strip()
+        color = STATUS_ROW_FOREGROUND_HEX.get(status)
+        return QColor(color) if color else None

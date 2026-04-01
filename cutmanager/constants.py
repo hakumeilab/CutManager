@@ -22,6 +22,14 @@ COLUMN_DELIVERY_DATE = 7
 
 STATUS_OPTIONS = ("", "兼用", "BANK", "欠番")
 LEGACY_STATUS_HEADERS = ("兼用", "BANK", "欠番")
+STATUS_ROW_BACKGROUND_HEX = {
+    "欠番": "#4b5563",
+    "兼用": "#dcfce7",
+    "BANK": "#fee2e2",
+}
+STATUS_ROW_FOREGROUND_HEX = {
+    "欠番": "#f8fafc",
+}
 
 CSV_FILE_FILTER = "CSV Files (*.csv)"
 WINDOW_TITLE = "CutManager"

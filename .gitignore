@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+deployment/
+build/
+dist/
+CutManager.dist/

@@ -65,7 +65,7 @@ plugins =
 macos.permissions = 
 
 # mode of using nuitka. accepts standalone or onefile. default = onefile
-mode = standalone
+mode = onefile
 
 # specify any extra nuitka arguments
 extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable

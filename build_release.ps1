@@ -16,8 +16,8 @@ if (-not $versionMatch) {
 }
 
 $version = $versionMatch.Matches[0].Groups["version"].Value
-$zipPath = Join-Path $distDir "CutManager-$version-windows-standalone.zip"
-$hashPath = Join-Path $distDir "CutManager-$version-windows-standalone.sha256.txt"
+$releaseExePath = Join-Path $distDir "CutManager-$version-windows-onefile.exe"
+$hashPath = Join-Path $distDir "CutManager-$version-windows-onefile.sha256.txt"
 
 if (-not (Test-Path -LiteralPath $pythonExe)) {
     throw "Python executable was not found: $pythonExe"
@@ -41,51 +41,57 @@ try {
         throw "pyside6-deploy failed with exit code $LASTEXITCODE."
     }
 
-    $buildOutputDir = @(
-        (Join-Path $repoRoot "deployment"),
-        (Join-Path $repoRoot "CutManager.dist")
-    ) |
-        Where-Object { Test-Path -LiteralPath $_ } |
+    $candidateExePaths = @(
+        (Join-Path $repoRoot "CutManager.exe"),
+        (Join-Path $repoRoot "main.exe"),
+        (Join-Path $repoRoot "deployment\CutManager.exe"),
+        (Join-Path $repoRoot "deployment\main.exe"),
+        (Join-Path $repoRoot "CutManager.dist\CutManager.exe"),
+        (Join-Path $repoRoot "CutManager.dist\main.exe")
+    ) | Where-Object { Test-Path -LiteralPath $_ }
+
+    if (-not $candidateExePaths) {
+        throw "Build succeeded but no executable output was found."
+    }
+
+    $builtExe = $candidateExePaths |
         Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending |
         Select-Object -First 1
 
-    if (-not $buildOutputDir) {
-        throw "Build succeeded but no output directory was found."
-    }
-
-    $expectedExe = Join-Path $buildOutputDir "CutManager.exe"
-    $fallbackExe = Join-Path $buildOutputDir "main.exe"
-    if (Test-Path -LiteralPath $fallbackExe) {
+    $builtExeDirectory = Split-Path -Path $builtExe -Parent
+    $expectedExe = Join-Path $builtExeDirectory "CutManager.exe"
+    if ([System.IO.Path]::GetFileName($builtExe) -ieq "main.exe") {
         if (Test-Path -LiteralPath $expectedExe) {
             Remove-Item -LiteralPath $expectedExe -Force
         }
-        Move-Item -LiteralPath $fallbackExe -Destination $expectedExe -Force
+        Move-Item -LiteralPath $builtExe -Destination $expectedExe -Force
+        $builtExe = $expectedExe
     }
 
-    if (-not (Test-Path -LiteralPath $expectedExe)) {
-        throw "Build succeeded but CutManager.exe was not found in $buildOutputDir."
+    if (-not (Test-Path -LiteralPath $builtExe)) {
+        throw "Build succeeded but CutManager.exe was not found."
     }
 
     New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-    if (Test-Path -LiteralPath $zipPath) {
-        Remove-Item -LiteralPath $zipPath -Force
+    if (Test-Path -LiteralPath $releaseExePath) {
+        Remove-Item -LiteralPath $releaseExePath -Force
     }
 
     if (Test-Path -LiteralPath $hashPath) {
         Remove-Item -LiteralPath $hashPath -Force
     }
 
-    Compress-Archive -Path (Join-Path $buildOutputDir "*") -DestinationPath $zipPath -Force
+    Copy-Item -LiteralPath $builtExe -Destination $releaseExePath -Force
 
-    $hash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
-    $hashLine = "{0} *{1}" -f $hash.Hash.ToLowerInvariant(), [System.IO.Path]::GetFileName($zipPath)
+    $hash = Get-FileHash -LiteralPath $releaseExePath -Algorithm SHA256
+    $hashLine = "{0} *{1}" -f $hash.Hash.ToLowerInvariant(), [System.IO.Path]::GetFileName($releaseExePath)
     Set-Content -LiteralPath $hashPath -Value $hashLine -Encoding ASCII
 
     Write-Host "Release assets created."
     Write-Host "Version : $version"
-    Write-Host "Build   : $buildOutputDir"
-    Write-Host "ZIP     : $zipPath"
+    Write-Host "Build   : $builtExeDirectory"
+    Write-Host "EXE     : $releaseExePath"
     Write-Host "SHA256  : $hashPath"
 }
 finally {

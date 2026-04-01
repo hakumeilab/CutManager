@@ -5,3 +5,5 @@ deployment/
 build/
 dist/
 CutManager.dist/
+CutManager.exe
+main.exe

@@ -97,11 +97,11 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $version = "${{ steps.metadata.outputs.version }}"
           $notesPath = "${{ steps.metadata.outputs.notes_path }}"
-          $zipPath = "dist/CutManager-$version-windows-standalone.zip"
-          $hashPath = "dist/CutManager-$version-windows-standalone.sha256.txt"
+          $exePath = "dist/CutManager-$version-windows-onefile.exe"
+          $hashPath = "dist/CutManager-$version-windows-onefile.sha256.txt"
 
-          if (-not (Test-Path -LiteralPath $zipPath)) {
-            throw "Release archive was not found: $zipPath"
+          if (-not (Test-Path -LiteralPath $exePath)) {
+            throw "Release executable was not found: $exePath"
           }
 
           if (-not (Test-Path -LiteralPath $hashPath)) {
@@ -110,9 +110,9 @@ jobs:
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $zipPath $hashPath --clobber
+            gh release upload $tag $exePath $hashPath --clobber
             gh release edit $tag --title "CutManager $version" --notes-file $notesPath
             exit $LASTEXITCODE
           }
 
-          gh release create $tag $zipPath $hashPath --title "CutManager $version" --notes-file $notesPath
+          gh release create $tag $exePath $hashPath --title "CutManager $version" --notes-file $notesPath

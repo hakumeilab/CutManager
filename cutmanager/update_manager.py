@@ -168,12 +168,7 @@ def prepare_update(downloaded_path: Path) -> PreparedUpdate:
     suffix = downloaded_path.suffix.casefold()
 
     if suffix == ".exe":
-        return PreparedUpdate(
-            launch_program=str(downloaded_path),
-            launch_arguments=[],
-            mode="installer",
-            downloaded_path=downloaded_path,
-        )
+        return _prepare_executable_update(downloaded_path)
 
     if suffix != ".zip":
         raise UpdateError("対応していない更新ファイル形式です。zip または exe を使用してください。")
@@ -223,6 +218,45 @@ def _is_packaged_runtime() -> bool:
     if bool(getattr(sys, "frozen", False)):
         return True
     return "__compiled__" in globals()
+
+
+def _prepare_executable_update(downloaded_path: Path) -> PreparedUpdate:
+    if not can_apply_update_in_place():
+        return PreparedUpdate(
+            launch_program=str(downloaded_path),
+            launch_arguments=[],
+            mode="installer",
+            downloaded_path=downloaded_path,
+        )
+
+    current_executable = Path(sys.executable).resolve()
+    downloaded_executable = downloaded_path.resolve()
+    if downloaded_executable == current_executable:
+        raise UpdateError("現在実行中のファイルと同じ exe は更新に使用できません。")
+
+    script_path = downloaded_path.parent / "apply_cutmanager_exe_update.ps1"
+    script_path.write_text(
+        _build_executable_update_script(
+            downloaded_executable=downloaded_executable,
+            target_executable=current_executable,
+            process_id=os.getpid(),
+        ),
+        encoding="utf-8",
+    )
+
+    return PreparedUpdate(
+        launch_program="powershell.exe",
+        launch_arguments=[
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script_path),
+        ],
+        mode="replace-exe",
+        downloaded_path=downloaded_path,
+    )
 
 
 def normalize_version(value: str) -> str:
@@ -328,14 +362,16 @@ def _asset_score(asset: UpdateAsset, *, prefer_zip: bool) -> int:
     suffix = asset.suffix
 
     if suffix == ".zip":
-        score = 200 if prefer_zip else 120
+        score = 140 if prefer_zip else 100
     elif suffix == ".exe":
-        score = 180 if prefer_zip else 200
+        score = 220 if can_apply_update_in_place() else 200
     else:
         return -1
 
     if "cutmanager" in name:
         score += 50
+    if "onefile" in name or "single-file" in name:
+        score += 40
     if "standalone" in name or "portable" in name:
         score += 30
     if "windows" in name or "win" in name:
@@ -463,6 +499,55 @@ def _build_update_script(
         "    Copy-Item -LiteralPath $_.FullName -Destination $targetDir -Recurse -Force\n"
         "}\n"
         "$targetExe = Join-Path $targetDir $relativeExe\n"
+        "Start-Sleep -Milliseconds 300\n"
+        "Start-Process -FilePath $targetExe\n"
+    )
+
+
+def _build_executable_update_script(
+    *,
+    downloaded_executable: Path,
+    target_executable: Path,
+    process_id: int,
+) -> str:
+    downloaded_text = _powershell_literal(downloaded_executable)
+    target_text = _powershell_literal(target_executable)
+    backup_executable = target_executable.with_suffix(target_executable.suffix + ".bak")
+    backup_text = _powershell_literal(backup_executable)
+
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$processIdToWait = {int(process_id)}\n"
+        f"$downloadedExe = '{downloaded_text}'\n"
+        f"$targetExe = '{target_text}'\n"
+        f"$backupExe = '{backup_text}'\n"
+        "for ($i = 0; $i -lt 120; $i++) {\n"
+        "    $proc = Get-Process -Id $processIdToWait -ErrorAction SilentlyContinue\n"
+        "    if (-not $proc) { break }\n"
+        "    Start-Sleep -Milliseconds 500\n"
+        "}\n"
+        "for ($i = 0; $i -lt 120; $i++) {\n"
+        "    try {\n"
+        "        if (Test-Path -LiteralPath $backupExe) {\n"
+        "            Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue\n"
+        "        }\n"
+        "        if (Test-Path -LiteralPath $targetExe) {\n"
+        "            Move-Item -LiteralPath $targetExe -Destination $backupExe -Force\n"
+        "        }\n"
+        "        break\n"
+        "    } catch {\n"
+        "        if ($i -eq 119) { throw }\n"
+        "        Start-Sleep -Milliseconds 500\n"
+        "    }\n"
+        "}\n"
+        "try {\n"
+        "    Move-Item -LiteralPath $downloadedExe -Destination $targetExe -Force\n"
+        "} catch {\n"
+        "    if ((-not (Test-Path -LiteralPath $targetExe)) -and (Test-Path -LiteralPath $backupExe)) {\n"
+        "        Move-Item -LiteralPath $backupExe -Destination $targetExe -Force\n"
+        "    }\n"
+        "    throw\n"
+        "}\n"
         "Start-Sleep -Milliseconds 300\n"
         "Start-Process -FilePath $targetExe\n"
     )

@@ -311,6 +311,18 @@ def _read_json(url: str) -> dict:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            reset_text = _format_rate_limit_reset_time(exc.headers.get("X-RateLimit-Reset", ""))
+            retry_message = (
+                f"{reset_text} 以降に再試行してください。"
+                if reset_text
+                else "しばらく待ってから再試行してください。"
+            )
+            raise UpdateError(
+                "GitHub API のレート制限により更新情報を取得できませんでした。"
+                f"{retry_message}\n"
+                f"手動確認: {RELEASES_PAGE_URL}"
+            ) from exc
         if exc.code == 404:
             raise UpdateError(
                 "最新リリースが見つかりませんでした。GitHub Releases が公開されているか確認してください。"
@@ -329,6 +341,19 @@ def _parse_asset(payload: dict) -> UpdateAsset:
         size=int(payload.get("size") or 0),
         content_type=str(payload.get("content_type") or ""),
     )
+
+
+def _format_rate_limit_reset_time(value: str) -> str:
+    text = str(value or "").strip()
+    if not text.isdigit():
+        return ""
+
+    try:
+        reset_datetime = datetime.fromtimestamp(int(text), tz=timezone.utc).astimezone()
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+    return reset_datetime.strftime("%Y/%m/%d %H:%M")
 
 
 def _select_release_asset(assets: list[UpdateAsset]) -> UpdateAsset | None:

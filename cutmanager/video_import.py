@@ -17,6 +17,7 @@ from .folder_import import CUT_IDENTIFIER_PATTERN, CutIdentifier, extract_cut_id
 
 
 EXPLICIT_TAKE_PATTERN = re.compile(r"(?i)(?:^|[_\-\s])(take|tk|t)[_\-\s]*([0-9]{1,3})(?=$|[_\-\s])")
+SUFFIX_TAKE_PATTERN = re.compile(r"(?:^|[_\-\s])([A-Za-z])([0-9]{1,3})(?=$|[_\-\s])")
 NUMBER_GROUP_PATTERN = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")
 
 
@@ -89,8 +90,7 @@ def extract_video_metadata(video_path: str | Path) -> VideoMetadata | None:
     if not cut_identifiers:
         return None
 
-    take_number = _extract_take_number(stem, cut_identifiers)
-    take_label = "T" if take_number else stem
+    take_label, take_number = _extract_take_info(stem, cut_identifiers)
     return VideoMetadata(
         cut_identifiers=cut_identifiers,
         compatible_label="兼用" if len(cut_identifiers) > 1 else "",
@@ -116,15 +116,22 @@ def _video_sort_key(path: Path) -> tuple[int, str]:
     return (modified_time, path.name.casefold())
 
 
-def _extract_take_number(stem: str, cut_identifiers: list[CutIdentifier]) -> str:
+def _extract_take_info(stem: str, cut_identifiers: list[CutIdentifier]) -> tuple[str, str]:
     explicit_match = EXPLICIT_TAKE_PATTERN.search(stem)
     if explicit_match is not None:
-        return explicit_match.group(2)
+        return ("T", explicit_match.group(2))
 
     last_cut_end = max(
         (match.end() for match in CUT_IDENTIFIER_PATTERN.finditer(stem)),
         default=0,
     )
+    suffix_match = None
+    for match in SUFFIX_TAKE_PATTERN.finditer(stem):
+        if match.start() >= last_cut_end:
+            suffix_match = match
+    if suffix_match is not None:
+        return (suffix_match.group(1).upper(), suffix_match.group(2))
+
     known_cut_numbers = {cut_identifier.cut_number for cut_identifier in cut_identifiers}
     fallback_numbers = [
         match.group(1)
@@ -132,5 +139,5 @@ def _extract_take_number(stem: str, cut_identifiers: list[CutIdentifier]) -> str
         if match.start() >= last_cut_end and match.group(1) not in known_cut_numbers
     ]
     if fallback_numbers:
-        return fallback_numbers[-1]
-    return ""
+        return ("T", fallback_numbers[-1])
+    return (stem, "")

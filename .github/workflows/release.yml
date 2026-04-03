@@ -108,8 +108,12 @@ jobs:
             throw "Release checksum was not found: $hashPath"
           }
 
+          $PSNativeCommandUseErrorActionPreference = $false
           gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releaseExists = $LASTEXITCODE -eq 0
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          if ($releaseExists) {
             gh release upload $tag $exePath $hashPath --clobber
             gh release edit $tag --title "CutManager $version" --notes-file $notesPath
             exit $LASTEXITCODE

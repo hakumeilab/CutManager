@@ -34,6 +34,12 @@ jobs:
           .\.venv\Scripts\python.exe -m pip install --upgrade pip
           .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install innosetup --no-progress -y
+
       - name: Resolve release metadata
         id: metadata
         shell: pwsh
@@ -97,15 +103,16 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $version = "${{ steps.metadata.outputs.version }}"
           $notesPath = "${{ steps.metadata.outputs.notes_path }}"
-          $exePath = "dist/CutManager-$version-windows-onefile.exe"
-          $hashPath = "dist/CutManager-$version-windows-onefile.sha256.txt"
+          $onefileExePath = "dist/CutManager-$version-windows-onefile.exe"
+          $onefileHashPath = "dist/CutManager-$version-windows-onefile.sha256.txt"
+          $setupExePath = "dist/CutManager-$version-windows-setup.exe"
+          $setupHashPath = "dist/CutManager-$version-windows-setup.sha256.txt"
+          $assetPaths = @($setupExePath, $setupHashPath, $onefileExePath, $onefileHashPath)
 
-          if (-not (Test-Path -LiteralPath $exePath)) {
-            throw "Release executable was not found: $exePath"
-          }
-
-          if (-not (Test-Path -LiteralPath $hashPath)) {
-            throw "Release checksum was not found: $hashPath"
+          foreach ($assetPath in $assetPaths) {
+            if (-not (Test-Path -LiteralPath $assetPath)) {
+              throw "Release asset was not found: $assetPath"
+            }
           }
 
           $PSNativeCommandUseErrorActionPreference = $false
@@ -114,9 +121,9 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
 
           if ($releaseExists) {
-            gh release upload $tag $exePath $hashPath --clobber
+            gh release upload $tag @assetPaths --clobber
             gh release edit $tag --title "CutManager $version" --notes-file $notesPath
             exit $LASTEXITCODE
           }
 
-          gh release create $tag $exePath $hashPath --title "CutManager $version" --notes-file $notesPath
+          gh release create $tag @assetPaths --title "CutManager $version" --notes-file $notesPath

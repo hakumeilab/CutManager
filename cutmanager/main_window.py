@@ -44,7 +44,6 @@ from .update_manager import (
     UpdateCheckWorker,
     UpdateDownloadWorker,
     UpdateError,
-    can_apply_update_in_place,
     human_readable_size,
     prepare_update,
 )
@@ -820,7 +819,7 @@ class MainWindow(QMainWindow):
             update_button = None
             if asset is not None:
                 update_label = "ダウンロードして更新"
-                if asset.suffix == ".exe" and not can_apply_update_in_place():
+                if asset.suffix == ".exe":
                     update_label = "インストーラーを起動"
                 update_button = message_box.addButton(update_label, QMessageBox.ButtonRole.AcceptRole)
             open_release_button = message_box.addButton("リリースページを開く", QMessageBox.ButtonRole.ActionRole)

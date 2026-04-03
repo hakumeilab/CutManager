@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6 - 2026-04-03
+
+- Release asset に Inno Setup の `windows-setup.exe` を追加
+- アプリ内更新では onefile exe の自己上書きではなく、setup exe の起動を優先するように変更
+- インストール先の既定値を `%LOCALAPPDATA%\Programs\CutManager` に設定
+
 ## 0.2.5 - 2026-04-03
 
 - Release workflow の GitHub Release 作成/更新 step が、初回作成時でも落ちないように修正

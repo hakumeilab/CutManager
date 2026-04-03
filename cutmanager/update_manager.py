@@ -221,6 +221,13 @@ def _is_packaged_runtime() -> bool:
 
 
 def _prepare_executable_update(downloaded_path: Path) -> PreparedUpdate:
+    return PreparedUpdate(
+        launch_program=str(downloaded_path),
+        launch_arguments=[],
+        mode="installer",
+        downloaded_path=downloaded_path,
+    )
+
     if not can_apply_update_in_place():
         return PreparedUpdate(
             launch_program=str(downloaded_path),
@@ -395,6 +402,8 @@ def _asset_score(asset: UpdateAsset, *, prefer_zip: bool) -> int:
 
     if "cutmanager" in name:
         score += 50
+    if "setup" in name or "installer" in name:
+        score += 120
     if "onefile" in name or "single-file" in name:
         score += 40
     if "standalone" in name or "portable" in name:

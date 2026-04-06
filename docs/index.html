@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="CutManagerは、アニメ撮影で素材管理の手間を減らし、本作業に集中しやすくするWindows向けデスクトップアプリです。">
+  <title>CutManager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="#top">CutManager</a>
+      <div class="site-header-actions">
+        <nav class="site-nav" aria-label="Primary">
+          <a href="#features">特徴</a>
+          <a href="#usage">使い方</a>
+          <a href="#benefits">現場で役立つこと</a>
+        </nav>
+        <a class="button button-primary button-header-download" data-release-link href="https://github.com/hakumeilab/CutManager/releases/latest">ダウンロード</a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero reveal">
+        <div class="hero-copy reveal">
+          <div class="hero-badge-row">
+            <span class="hero-badge">カット管理</span>
+            <span class="hero-badge">Windows アプリ</span>
+          </div>
+          <p class="eyebrow">Windows アプリ</p>
+          <h1>アニメ撮影の管理を、<br>もっと進めやすく。</h1>
+          <p class="hero-text">素材管理の手間を減らして、カット数の多い現場でも次の作業を判断しやすくします。</p>
+          <div class="hero-actions">
+            <a class="button button-primary button-download" data-release-link href="https://github.com/hakumeilab/CutManager/releases/latest">Windows版をダウンロード</a>
+            <a class="button button-secondary" href="https://github.com/hakumeilab/CutManager">GitHub</a>
+          </div>
+          <ul class="hero-meta">
+            <li><span data-release-version>最新版を確認中</span></li>
+            <li>Windows</li>
+            <li>MIT</li>
+          </ul>
+        </div>
+
+        <div class="hero-panel reveal" aria-hidden="true">
+          <div class="app-card">
+            <div class="app-topbar">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <div class="app-menubar">
+              <span>ファイル</span>
+              <span>編集</span>
+              <span>並べ替え</span>
+              <span>ヘルプ</span>
+            </div>
+            <div class="app-grid">
+              <div class="app-drop-hint">ここに CSV / 素材フォルダー / 動画ファイルをドロップ</div>
+              <div class="app-toolbar">
+                <span class="toolbar-chip">開く</span>
+                <span class="toolbar-chip">保存</span>
+                <span class="toolbar-chip">絞り込み</span>
+                <span class="toolbar-chip active">並び替え</span>
+              </div>
+              <div class="grid-head">
+                <span>カット番号</span>
+                <span>AB分け</span>
+                <span>区分</span>
+                <span>素材入れ回数</span>
+                <span>素材入れ日</span>
+                <span>テイク</span>
+                <span>テイク番号</span>
+                <span>納品日</span>
+              </div>
+              <div class="grid-row">
+                <span>085</span>
+                <span>A</span>
+                <span class="status-chip compatible">兼用</span>
+                <span>1</span>
+                <span>2026/04/03</span>
+                <span>T</span>
+                <span>02</span>
+                <span>2026/04/05</span>
+              </div>
+              <div class="grid-row">
+                <span>085</span>
+                <span>B</span>
+                <span class="status-chip bank">BANK</span>
+                <span>1</span>
+                <span>2026/04/03</span>
+                <span>T</span>
+                <span>03</span>
+                <span>2026/04/05</span>
+              </div>
+              <div class="grid-row accent">
+                <span>169</span>
+                <span></span>
+                <span class="status-chip missing">欠番</span>
+                <span>2</span>
+                <span>2026/04/04</span>
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+            <div class="app-statusbar">
+              <span>cutlist.csv</span>
+              <span>3行</span>
+              <span>未保存の変更あり</span>
+              <span>直前の取り込み: 動画 2件</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="features">
+        <div class="section-heading reveal">
+          <h2>主な機能</h2>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card reveal">
+            <div class="feature-visual" aria-hidden="true">
+              <div class="feature-icon feature-icon-folder"></div>
+            </div>
+            <p class="feature-kicker">取り込み</p>
+            <h3>素材名から拾えます</h3>
+            <p>素材フォルダー名や動画名から、カット情報を自動で整理できます。</p>
+          </article>
+          <article class="feature-card reveal">
+            <div class="feature-visual" aria-hidden="true">
+              <div class="feature-icon feature-icon-sort"></div>
+            </div>
+            <p class="feature-kicker">整理</p>
+            <h3>ソートやフィルターで整理できます</h3>
+            <p>納品前の確認や進行に合わせて、必要なカットを絞り込みながら見やすく整えられます。</p>
+          </article>
+          <article class="feature-card reveal">
+            <div class="feature-visual" aria-hidden="true">
+              <div class="feature-icon feature-icon-grid"></div>
+            </div>
+            <p class="feature-kicker">軽快</p>
+            <h3>軽く編集できます</h3>
+            <p>CSVベースなので、Excelを開くより軽く管理できます。</p>
+          </article>
+          <article class="feature-card reveal">
+            <div class="feature-visual" aria-hidden="true">
+              <div class="feature-icon feature-icon-refresh"></div>
+            </div>
+            <p class="feature-kicker">更新</p>
+            <h3>更新もすぐ確認できます</h3>
+            <p>ボタン一つで最新版を確認できるので、配布や更新の手間を抑えやすくなります。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section reveal" id="usage">
+        <div class="section-heading reveal">
+          <h2>ドラッグ&amp;ドロップですぐ使えます。</h2>
+        </div>
+
+        <div class="usage-card reveal">
+          <p class="usage-lead">ドラッグ&amp;ドロップするだけで管理できます。</p>
+          <div class="usage-visual" aria-hidden="true">
+            <div class="usage-flow">
+              <p class="usage-flow-label">素材管理</p>
+              <div class="usage-node usage-folder">
+                <div class="usage-icon folder-icon"></div>
+                <span>カットフォルダー</span>
+              </div>
+            </div>
+            <div class="usage-arrow">→</div>
+            <div class="usage-flow">
+              <p class="usage-flow-label">ツール</p>
+              <div class="usage-node usage-app">
+                <div class="usage-icon app-icon"></div>
+                <span>CutManager</span>
+              </div>
+            </div>
+            <div class="usage-arrow">→</div>
+            <div class="usage-flow">
+              <p class="usage-flow-label">結果</p>
+              <div class="usage-node usage-result">
+                <div class="usage-icon sheet-icon"></div>
+                <span>未処理カットが分かる</span>
+              </div>
+            </div>
+          </div>
+          <div class="usage-visual usage-visual-secondary" aria-hidden="true">
+            <div class="usage-flow">
+              <p class="usage-flow-label">納品時</p>
+              <div class="usage-node usage-movie">
+                <div class="usage-icon movie-icon"></div>
+                <span>ムービーファイル</span>
+              </div>
+            </div>
+            <div class="usage-arrow">→</div>
+            <div class="usage-flow">
+              <p class="usage-flow-label">ツール</p>
+              <div class="usage-node usage-app">
+                <div class="usage-icon app-icon"></div>
+                <span>CutManager</span>
+              </div>
+            </div>
+            <div class="usage-arrow">→</div>
+            <div class="usage-flow">
+              <p class="usage-flow-label">反映</p>
+              <div class="usage-node usage-result">
+                <div class="usage-icon sheet-icon"></div>
+                <span>納品状況が分かる</span>
+              </div>
+            </div>
+          </div>
+          <p class="usage-text">カット番号や素材情報を読み取って、自動で整理します。</p>
+          <p class="usage-subtext">納品のときは、ムービーファイルをドラッグ&amp;ドロップして管理に反映できます。</p>
+        </div>
+      </section>
+
+      <section class="section reveal" id="benefits">
+        <div class="section-heading reveal">
+          <h2>現場でこう役立ちます。</h2>
+        </div>
+
+        <div class="benefit-orbit reveal">
+          <div class="benefit-core">CutManager</div>
+          <div class="benefit-orbit-item benefit-orbit-top">
+            <article class="benefit-card reveal">
+              <h3>納品状況が追いやすい</h3>
+              <p>いつ納品したかが分かるので、必要なムービーをあとから探しやすくなります。</p>
+            </article>
+          </div>
+          <div class="benefit-orbit-item benefit-orbit-left">
+            <article class="benefit-card reveal">
+              <h3>納品漏れを防ぎやすい</h3>
+              <p>たくさんのカットを扱うアニメ撮影でも、未処理のカットを見落としにくくなります。</p>
+            </article>
+          </div>
+          <div class="benefit-orbit-item benefit-orbit-right">
+            <article class="benefit-card reveal">
+              <h3>次の作業が見えやすい</h3>
+              <p>どのカットが終わっていないかが分かるので、計画を立てやすく、作業に集中できます。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="summary">
+        <div class="section-heading reveal">
+          <h2>アニメ撮影の管理を、もっと進めやすく。</h2>
+        </div>
+
+        <p class="benefit-summary reveal">
+          CutManagerは、納品状況や未処理カットを見えやすくして、探す時間や確認の手間を減らします。アニメ撮影の管理の見通しを良くしたいときに使えるツールです。
+        </p>
+      </section>
+
+      <section class="section download reveal" id="download">
+        <div class="download-card reveal">
+          <div>
+            <h2>今すぐはじめましょう。</h2>
+            <p><span data-release-summary>GitHub Releases から最新版を取得できます。</span></p>
+          </div>
+          <div class="download-actions">
+            <a class="button button-primary button-download" data-release-link href="https://github.com/hakumeilab/CutManager/releases/latest">Windows版をダウンロード</a>
+            <a class="button button-secondary" href="https://github.com/hakumeilab/CutManager/blob/main/README.md">README</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="license">
+        <div class="section-heading reveal">
+          <h2>ライセンス</h2>
+        </div>
+
+        <div class="release-card reveal">
+          <p class="credit-text">
+            CutManager は <strong>MIT License</strong> で公開しています。利用・改変・再配布の条件は
+            <a class="credit-link" href="https://github.com/hakumeilab/CutManager/blob/main/LICENSE">LICENSE</a>
+            をご確認ください。
+          </p>
+          <p class="credit-text">
+            また、アニメや映像制作などで CutManager をご使用いただいた際、クレジットに記載いただけるととてもうれしく思います。
+            掲載をご検討いただける場合は、掲載する名前や役職名などを調整したいので、
+            <a class="credit-link" href="mailto:hakumeilab@gmail.com">hakumeilab@gmail.com</a>
+            までご連絡ください。
+          </p>
+          <p class="credit-note">
+            ※ このお願いは任意です。クレジット掲載の有無は、CutManager の使用条件に一切影響しません。
+          </p>
+        </div>
+      </section>
+
+      <section class="section reveal" id="latest">
+        <div class="section-heading reveal">
+          <h2>更新履歴</h2>
+        </div>
+
+        <div class="release-card reveal">
+          <div class="release-head">
+            <p class="release-version" data-release-version-heading>最新版を確認中</p>
+            <p class="release-date" data-release-date></p>
+          </div>
+          <div class="release-notes" data-release-notes>
+            GitHub Releases から最新情報を読み込んでいます。
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>CutManager</p>
+      <p>アニメ撮影向け素材管理ツール</p>
+    </footer>
+  </div>
+  <script src="./script.js"></script>
+</body>
+</html>

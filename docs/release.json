@@ -1,0 +1,12 @@
+{
+  "version": "0.2.6",
+  "tag_name": "v0.2.6",
+  "published_at": "2026-04-03",
+  "html_url": "https://github.com/hakumeilab/CutManager/releases/latest",
+  "download_url": "https://github.com/hakumeilab/CutManager/releases/latest",
+  "notes": [
+    "Release asset に Inno Setup の `windows-setup.exe` を追加",
+    "アプリ内更新では onefile exe の自己上書きではなく、setup exe の起動を優先するように変更",
+    "インストール先の既定値を `%LOCALAPPDATA%\\Programs\\CutManager` に設定"
+  ]
+}

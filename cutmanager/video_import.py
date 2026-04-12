@@ -11,6 +11,7 @@ from .constants import (
     COLUMN_STATUS,
     COLUMN_TAKE,
     COLUMN_TAKE_NUMBER,
+    CSV_HEADERS,
     VIDEO_FILE_EXTENSIONS,
 )
 from .folder_import import CUT_IDENTIFIER_PATTERN, CutIdentifier, extract_cut_identifiers, make_cut_key
@@ -34,6 +35,14 @@ class VideoImportResult:
     rows: list[list[str]]
     updated_count: int
     unmatched_count: int
+    unmatched_files: list[str]
+    failed_count: int
+
+
+@dataclass(slots=True)
+class VideoDraftRowsResult:
+    rows: list[list[str]]
+    added_count: int
     failed_count: int
 
 
@@ -46,6 +55,8 @@ def apply_videos_to_rows(
     row_by_cut = _build_row_map(updated_rows)
     updated_count = 0
     unmatched_count = 0
+    unmatched_files: list[str] = []
+    unmatched_file_keys: set[str] = set()
     failed_count = 0
 
     for video_path in sorted((Path(path) for path in video_paths), key=_video_sort_key):
@@ -58,6 +69,10 @@ def apply_videos_to_rows(
             row_index = row_by_cut.get(cut_identifier.key)
             if row_index is None:
                 unmatched_count += 1
+                file_key = str(video_path.resolve(strict=False)).casefold()
+                if file_key not in unmatched_file_keys:
+                    unmatched_file_keys.add(file_key)
+                    unmatched_files.append(video_path.name)
                 continue
 
             row = updated_rows[row_index]
@@ -72,12 +87,44 @@ def apply_videos_to_rows(
         rows=updated_rows,
         updated_count=updated_count,
         unmatched_count=unmatched_count,
+        unmatched_files=unmatched_files,
         failed_count=failed_count,
     )
 
 
 def is_video_file(path: str | Path) -> bool:
     return Path(path).suffix.casefold() in VIDEO_FILE_EXTENSIONS
+
+
+def build_rows_from_video_files(
+    video_paths: list[str | Path],
+    existing_cut_keys: set[tuple[str, str]],
+    delivery_date: str,
+) -> VideoDraftRowsResult:
+    seen_existing_cut_keys = {
+        make_cut_key(cut_number, ab_group)
+        for cut_number, ab_group in existing_cut_keys
+        if str(cut_number or "").strip()
+    }
+    rows_by_cut: dict[tuple[str, str], list[str]] = {}
+    failed_count = 0
+
+    for video_path in sorted((Path(path) for path in video_paths), key=_video_sort_key):
+        metadata = extract_video_metadata(video_path)
+        if metadata is None:
+            failed_count += 1
+            continue
+
+        for cut_identifier in metadata.cut_identifiers:
+            if cut_identifier.key in seen_existing_cut_keys:
+                continue
+            rows_by_cut[cut_identifier.key] = _build_video_row(cut_identifier, metadata, delivery_date)
+
+    return VideoDraftRowsResult(
+        rows=list(rows_by_cut.values()),
+        added_count=len(rows_by_cut),
+        failed_count=failed_count,
+    )
 
 
 def extract_video_metadata(video_path: str | Path) -> VideoMetadata | None:
@@ -141,3 +188,14 @@ def _extract_take_info(stem: str, cut_identifiers: list[CutIdentifier]) -> tuple
     if fallback_numbers:
         return ("T", fallback_numbers[-1])
     return (stem, "")
+
+
+def _build_video_row(cut_identifier: CutIdentifier, metadata: VideoMetadata, delivery_date: str) -> list[str]:
+    row = [""] * len(CSV_HEADERS)
+    row[COLUMN_CUT_NUMBER] = cut_identifier.cut_number
+    row[COLUMN_AB_GROUP] = cut_identifier.ab_group
+    row[COLUMN_STATUS] = metadata.compatible_label
+    row[COLUMN_TAKE] = metadata.take_label
+    row[COLUMN_TAKE_NUMBER] = metadata.take_number
+    row[COLUMN_DELIVERY_DATE] = delivery_date
+    return row

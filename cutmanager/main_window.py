@@ -47,7 +47,7 @@ from .update_manager import (
     human_readable_size,
     prepare_update,
 )
-from .video_import import apply_videos_to_rows
+from .video_import import apply_videos_to_rows, build_rows_from_video_files
 from .view import CutItemDelegate, CutTableView, FilterHeaderView
 
 
@@ -1078,6 +1078,44 @@ class MainWindow(QMainWindow):
             return False
 
         delivery_date = QDate.currentDate().toString(IMPORT_DATE_FORMAT)
+        created_from_videos = False
+
+        if self.model.actual_row_count() == 0:
+            draft_result = build_rows_from_video_files(video_paths, self.model.cut_keys(), delivery_date)
+            if draft_result.added_count == 0:
+                QMessageBox.information(
+                    self,
+                    "動画反映",
+                    "動画名からカット番号を読み取れなかったため登録できませんでした。",
+                )
+                self.last_drop_summary = f"動画仮登録 0 / 読み取り失敗 {draft_result.failed_count}"
+                self.statusBar().showMessage(self.last_drop_summary, 7000)
+                self._update_status_labels()
+                return False
+
+            answer = QMessageBox.question(
+                self,
+                "動画反映",
+                (
+                    "この CSV はまだ空です。\n"
+                    f"動画 {len(video_paths)} 件から {draft_result.added_count} カットを仮登録して、"
+                    "納品情報を反映しますか。"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+
+            self.model.replace_rows(
+                draft_result.rows,
+                modified=True,
+                sort_column=self._sort_column,
+                sort_order=self._sort_order,
+            )
+            self._update_sort_indicator()
+            created_from_videos = True
+
         result = apply_videos_to_rows(video_paths, self.model.rows(), delivery_date)
 
         if result.updated_count:
@@ -1089,9 +1127,45 @@ class MainWindow(QMainWindow):
             )
             self._update_sort_indicator()
 
-        self.last_drop_summary = (
-            f"動画反映 {result.updated_count} / 未一致 {result.unmatched_count} / 抽出失敗 {result.failed_count}"
-        )
+        if created_from_videos:
+            self.last_drop_summary = f"動画仮登録 {result.updated_count} / 読み取り失敗 {result.failed_count}"
+        else:
+            self.last_drop_summary = (
+                f"動画反映 {result.updated_count} / 未一致 {result.unmatched_count} / 抽出失敗 {result.failed_count}"
+            )
+            if result.unmatched_files:
+                unmatched_lines = "\n".join(result.unmatched_files)
+                message_box = QMessageBox(self)
+                message_box.setIcon(QMessageBox.Icon.Information)
+                message_box.setWindowTitle("動画反映")
+                message_box.setText(
+                    (
+                        f"{result.updated_count} 件反映しました。\n"
+                        f"{len(result.unmatched_files)} 件は一致するカットが CSV にないため反映されませんでした。"
+                    )
+                )
+                message_box.setInformativeText(f"未一致ファイル:\n{unmatched_lines}")
+                register_button = message_box.addButton("未一致を仮登録", QMessageBox.ButtonRole.ActionRole)
+                close_button = message_box.addButton("閉じる", QMessageBox.ButtonRole.AcceptRole)
+                message_box.setDefaultButton(close_button)
+                message_box.exec()
+
+                if message_box.clickedButton() == register_button:
+                    draft_result = build_rows_from_video_files(video_paths, self.model.cut_keys(), delivery_date)
+                    if draft_result.added_count:
+                        merged_rows = self.model.rows()
+                        merged_rows.extend(draft_result.rows)
+                        self.model.replace_rows(
+                            merged_rows,
+                            modified=True,
+                            sort_column=self._sort_column,
+                            sort_order=self._sort_order,
+                        )
+                        self._update_sort_indicator()
+                    self.last_drop_summary = (
+                        f"動画反映 {result.updated_count} / 未一致 {result.unmatched_count} / "
+                        f"仮登録 {draft_result.added_count} / 抽出失敗 {result.failed_count}"
+                    )
         self.statusBar().showMessage(self.last_drop_summary, 7000)
         self._update_status_labels()
         return True

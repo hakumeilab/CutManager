@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemDelegate,
@@ -23,6 +23,12 @@ from .constants import COLUMN_STATUS, STATUS_OPTIONS
 
 class CellEditorLineEdit(QLineEdit):
     confirmRequested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFrame(False)
+        self.setTextMargins(2, 0, 2, 0)
+        self.setStyleSheet("QLineEdit { border: 0px; padding: 0px 2px; margin: 0px; }")
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -58,6 +64,7 @@ class CutItemDelegate(QStyledItemDelegate):
             editor.addItems(STATUS_OPTIONS)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
             editor.activated.connect(lambda *_args: self._commit_and_close(editor, move_down=True))
+            QTimer.singleShot(0, editor.showPopup)
         else:
             editor = CellEditorLineEdit(parent)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
@@ -83,13 +90,30 @@ class CutItemDelegate(QStyledItemDelegate):
         super().setModelData(editor, model, index)
 
     def paint(self, painter, option, index) -> None:
+        option_copy = type(option)(option)
+        self.initStyleOption(option_copy, index)
+
+        background = index.data(Qt.ItemDataRole.BackgroundRole)
+        if isinstance(background, QColor):
+            fill_color = QColor(background)
+            if option_copy.state & QStyle.StateFlag.State_Selected:
+                highlight = option_copy.palette.color(QPalette.ColorRole.Highlight)
+                fill_color = self._blend_colors(fill_color, highlight, 0.16)
+            painter.fillRect(option_copy.rect, fill_color)
+            option_copy.backgroundBrush = QColor(fill_color)
+
+        foreground = index.data(Qt.ItemDataRole.ForegroundRole)
+        if isinstance(foreground, QColor):
+            option_copy.palette.setColor(QPalette.ColorRole.Text, foreground)
+            option_copy.palette.setColor(QPalette.ColorRole.WindowText, foreground)
+            option_copy.palette.setColor(QPalette.ColorRole.HighlightedText, foreground)
+
+        option_copy.state &= ~QStyle.StateFlag.State_Selected
+        option_copy.state &= ~QStyle.StateFlag.State_HasFocus
+
         if index.column() == COLUMN_STATUS and self._is_editing_index(index):
-            option_copy = type(option)(option)
             option_copy.text = ""
-            self.drawBackground(painter, option_copy, index)
-            self.drawFocus(painter, option_copy, option_copy.rect)
-            return
-        super().paint(painter, option, index)
+        super().paint(painter, option_copy, index)
 
     def current_editor(self) -> QWidget | None:
         return self._active_editor
@@ -117,6 +141,16 @@ class CutItemDelegate(QStyledItemDelegate):
             return False
         return int(row_value) == index.row() and int(column_value) == index.column()
 
+    @staticmethod
+    def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:
+        alpha = max(0.0, min(1.0, overlay_alpha))
+        inverse = 1.0 - alpha
+        return QColor(
+            round((base.red() * inverse) + (overlay.red() * alpha)),
+            round((base.green() * inverse) + (overlay.green() * alpha)),
+            round((base.blue() * inverse) + (overlay.blue() * alpha)),
+        )
+
 
 class FilterHeaderView(QHeaderView):
     filterButtonClicked = Signal(int)
@@ -137,6 +171,19 @@ class FilterHeaderView(QHeaderView):
         if not rect.isValid() or rect.width() <= self.BUTTON_SIZE + (self.BUTTON_MARGIN * 2):
             return
 
+        if self._is_dark_palette():
+            button = QColor("#172033")
+            mid = QColor("#334155")
+            highlighted_text = QColor("#eff6ff")
+            accent = QColor("#3b82f6")
+            icon_idle = QColor("#9fb0c9")
+        else:
+            button = QColor("#ffffff")
+            mid = QColor("#cbd5e1")
+            highlighted_text = QColor("#eff6ff")
+            accent = QColor("#2563eb")
+            icon_idle = QColor("#475569")
+
         button_rect = self._button_rect(rect)
         option = QStyleOptionButton()
         option.rect = button_rect
@@ -144,9 +191,14 @@ class FilterHeaderView(QHeaderView):
         if logicalIndex in self._filtered_columns:
             option.state |= QStyle.StateFlag.State_On
 
-        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(mid)
+        painter.setBrush(button if logicalIndex not in self._filtered_columns else QColor(accent))
+        painter.drawRoundedRect(button_rect.adjusted(0, 0, -1, -1), 6, 6)
+        painter.restore()
 
-        icon_color = QColor("#2563eb" if logicalIndex in self._filtered_columns else "#475569")
+        icon_color = QColor(highlighted_text) if logicalIndex in self._filtered_columns else icon_idle
         icon_rect = button_rect.adjusted(5, 4, -5, -4)
         top_y = icon_rect.top()
         mid_y = icon_rect.center().y() - 1
@@ -194,6 +246,21 @@ class FilterHeaderView(QHeaderView):
             self.BUTTON_SIZE,
             self.BUTTON_SIZE,
         )
+
+    def _is_dark_palette(self) -> bool:
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                scheme = app.styleHints().colorScheme()
+                if scheme == Qt.ColorScheme.Dark:
+                    return True
+                if scheme == Qt.ColorScheme.Light:
+                    return False
+            except AttributeError:
+                pass
+        base = self.palette().color(QPalette.ColorRole.Base)
+        luminance = (0.299 * base.red()) + (0.587 * base.green()) + (0.114 * base.blue())
+        return luminance < 128
 
 
 class CutTableView(QTableView):

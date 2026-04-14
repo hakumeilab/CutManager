@@ -67,6 +67,10 @@ class MainWindow(QMainWindow):
         self._pending_resort = False
         self._skip_close_confirmation = False
         self._drag_feedback_active = False
+        self._theme_apply_pending = False
+        self._applying_theme_styles = False
+        self._last_window_stylesheet = ""
+        self._last_table_stylesheet = ""
         self.settings = QSettings("CutManager", "CutManager")
         self.recent_files = self._load_recent_files()
 
@@ -116,6 +120,7 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._build_ui()
         self._connect_signals()
+        self._connect_theme_signals()
         self._update_all_status()
         self._restore_last_session_file()
 
@@ -221,6 +226,7 @@ class MainWindow(QMainWindow):
         self.table_view.setAlternatingRowColors(True)
         self.table_view.setWordWrap(False)
         self.table_view.verticalHeader().setDefaultSectionSize(24)
+        self.table_view.verticalHeader().setMinimumWidth(44)
 
         header = FilterHeaderView(Qt.Orientation.Horizontal, self.table_view)
         self.table_view.setHorizontalHeader(header)
@@ -237,17 +243,24 @@ class MainWindow(QMainWindow):
         self._set_drag_feedback(False)
 
         container = QWidget(self)
+        container.setObjectName("mainContainer")
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(8, 0, 8, 8)
-        layout.setSpacing(6)
-        layout.addWidget(self.drop_hint_label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self.table_view, 1)
         self.setCentralWidget(container)
+        self.drop_hint_label.setParent(self.table_view.viewport())
+        self.drop_hint_label.raise_()
+        self._update_drop_hint_geometry()
 
         self.drop_progress_bar.setRange(0, 0)
         self.drop_progress_bar.setTextVisible(False)
         self.drop_progress_bar.setVisible(False)
         self.drop_progress_bar.setFixedWidth(160)
+        self.file_path_label.setObjectName("statusMeta")
+        self.row_count_label.setObjectName("statusMeta")
+        self.modified_label.setObjectName("statusMeta")
+        self.drop_result_label.setObjectName("statusMeta")
 
         status_bar = QStatusBar(self)
         status_bar.addPermanentWidget(self.file_path_label, 2)
@@ -319,6 +332,15 @@ class MainWindow(QMainWindow):
         self.proxy_model.rowsRemoved.connect(lambda *_: self._update_all_status())
         self.history.canUndoChanged.connect(self.undo_action.setEnabled)
         self.history.canRedoChanged.connect(self.redo_action.setEnabled)
+
+    def _connect_theme_signals(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.styleHints().colorSchemeChanged.connect(lambda *_: self._schedule_theme_style_refresh())
+        except AttributeError:
+            pass
         self.history.cleanChanged.connect(lambda clean: self.model.set_modified(not clean))
 
     def _update_all_status(self) -> None:
@@ -1256,68 +1278,245 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event) -> None:
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
-            self._apply_theme_styles()
+            self._schedule_theme_style_refresh()
         super().changeEvent(event)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_drop_hint_geometry()
+
+    def _schedule_theme_style_refresh(self) -> None:
+        if self._theme_apply_pending:
+            return
+        self._theme_apply_pending = True
+        QTimer.singleShot(0, self._apply_theme_styles)
+
+    def _update_drop_hint_geometry(self) -> None:
+        viewport = self.table_view.viewport()
+        if viewport is None:
+            return
+        margin = 16
+        hint_height = 54
+        width = max(220, viewport.width() - (margin * 2))
+        self.drop_hint_label.setGeometry(margin, margin, width, hint_height)
+        self.drop_hint_label.raise_()
+
     def _apply_theme_styles(self) -> None:
+        if self._applying_theme_styles:
+            return
+        self._theme_apply_pending = False
+        self._applying_theme_styles = True
         palette = self.palette()
-        if self._is_color_dark(palette.color(QPalette.ColorRole.Base)):
-            # Reuse the docs dark theme colors.
-            base = QColor("#0f172a")
-            alternate = QColor("#162033")
-            text = QColor("#e5eefc")
-            highlight = QColor("#3b82f6")
-            highlighted_text = QColor("#eff6ff")
-            mid = QColor("#334155")
-            button = QColor("#172033")
-            button_text = QColor("#bfdbfe")
-        else:
-            base = palette.color(QPalette.ColorRole.Base)
-            alternate = palette.color(QPalette.ColorRole.AlternateBase)
-            text = palette.color(QPalette.ColorRole.Text)
-            highlight = palette.color(QPalette.ColorRole.Highlight)
-            highlighted_text = palette.color(QPalette.ColorRole.HighlightedText)
-            mid = palette.color(QPalette.ColorRole.Mid)
-            button = palette.color(QPalette.ColorRole.Button)
-            button_text = palette.color(QPalette.ColorRole.ButtonText)
+        try:
+            if self._is_dark_theme():
+                # Reuse the docs dark theme colors.
+                base = QColor("#0f172a")
+                alternate = QColor("#162033")
+                text = QColor("#e5eefc")
+                muted = QColor("#c7d2e5")
+                highlight = QColor("#3b82f6")
+                highlighted_text = QColor("#eff6ff")
+                mid = QColor("#334155")
+                button = QColor("#172033")
+                button_text = QColor("#bfdbfe")
+                paper = QColor("#172033")
+                surface = QColor("#10192b")
+            else:
+                base = QColor("#ffffff")
+                alternate = QColor("#f7faff")
+                text = QColor("#0f172a")
+                muted = QColor("#475569")
+                highlight = QColor("#2563eb")
+                highlighted_text = QColor("#eff6ff")
+                mid = QColor("#cbd5e1")
+                button = QColor("#ffffff")
+                button_text = QColor("#0f172a")
+                paper = QColor("#ffffff")
+                surface = QColor("#f8fbff")
 
-        border_color = highlight if self._drag_feedback_active else mid
-        border_width = 2 if self._drag_feedback_active else 1
-        table_background = self._blend_colors(base, highlight, 0.08) if self._drag_feedback_active else base
-        hint_background = self._blend_colors(button, highlight, 0.18)
-        hint_text = highlight if self._is_color_dark(hint_background) == self._is_color_dark(highlight) else button_text
+            border_color = highlight if self._drag_feedback_active else mid
+            border_width = 2 if self._drag_feedback_active else 1
+            table_background = self._blend_colors(base, highlight, 0.08) if self._drag_feedback_active else base
+            selection_background = self._blend_colors(base, highlight, 0.22)
+            hint_background = self._blend_colors(button, highlight, 0.18)
+            hint_text = highlight if self._is_color_dark(hint_background) == self._is_color_dark(highlight) else button_text
 
-        self.drop_hint_label.setStyleSheet(
-            "QLabel {"
-            "padding: 8px 12px;"
-            f"border: 1px dashed {border_color.name()};"
-            f"background: {hint_background.name()};"
-            f"color: {hint_text.name()};"
-            "border-radius: 6px;"
-            "font-weight: 600;"
-            "}"
-        )
+            self.drop_hint_label.setStyleSheet(
+                "QLabel {"
+                "padding: 10px 14px;"
+                f"border: 1px dashed {border_color.name()};"
+                f"background: {hint_background.name()};"
+                f"color: {hint_text.name()};"
+                "border-radius: 8px;"
+                "font-weight: 600;"
+                "}"
+            )
 
-        self.table_view.setStyleSheet(
-            "QTableView {"
-            f"border: {border_width}px solid {border_color.name()};"
-            f"background: {table_background.name()};"
-            f"alternate-background-color: {alternate.name()};"
-            f"color: {text.name()};"
-            f"gridline-color: {mid.name()};"
-            f"selection-background-color: {highlight.name()};"
-            f"selection-color: {highlighted_text.name()};"
-            "}"
-            "QTableView::item:selected {"
-            f"background: {highlight.name()};"
-            f"color: {highlighted_text.name()};"
-            "}"
-            "QTableView::item:selected:active {"
-            f"background: {highlight.name()};"
-            f"color: {highlighted_text.name()};"
-            "}"
-        )
-        self.model.refresh_colors()
+            window_stylesheet = (
+                "QMainWindow {"
+                f"background: {surface.name()};"
+                f"color: {text.name()};"
+                "}"
+                "QWidget#mainContainer {"
+                f"background: {surface.name()};"
+                "}"
+                "QMenuBar {"
+                f"background: {paper.name()};"
+                f"color: {text.name()};"
+                f"border: 1px solid {self._blend_colors(mid, base, 0.35).name()};"
+                "border-radius: 8px;"
+                "padding: 4px 6px;"
+                "spacing: 8px;"
+                "}"
+                "QMenuBar::item {"
+                "padding: 6px 10px;"
+                "border-radius: 6px;"
+                "background: transparent;"
+                "}"
+                "QMenuBar::item:selected {"
+                f"background: {self._blend_colors(base, highlight, 0.12).name()};"
+                f"color: {text.name()};"
+                "}"
+                "QMenu {"
+                f"background: {paper.name()};"
+                f"color: {text.name()};"
+                f"border: 1px solid {mid.name()};"
+                "border-radius: 8px;"
+                "padding: 6px;"
+                "}"
+                "QMenu::item {"
+                "padding: 7px 12px;"
+                "border-radius: 6px;"
+                "margin: 2px 0;"
+                "}"
+                "QMenu::item:selected {"
+                f"background: {self._blend_colors(base, highlight, 0.16).name()};"
+                f"color: {text.name()};"
+                "}"
+                "QStatusBar {"
+                f"background: {paper.name()};"
+                f"color: {muted.name()};"
+                f"border-top: 1px solid {self._blend_colors(mid, base, 0.35).name()};"
+                "padding: 4px 8px;"
+                "}"
+                "QStatusBar::item { border: 0; }"
+                "QLabel#statusMeta {"
+                f"color: {muted.name()};"
+                "padding: 0 4px;"
+                "font-weight: 500;"
+                "}"
+                "QHeaderView::section {"
+                f"background: {paper.name()};"
+                f"color: {text.name()};"
+                f"border: 0px;"
+                f"border-bottom: 1px solid {mid.name()};"
+                "padding: 10px 12px;"
+                "font-weight: 600;"
+                "}"
+                "QTableView QHeaderView::section:vertical {"
+                f"background: {paper.name()};"
+                f"color: {muted.name()};"
+                f"border: 0px;"
+                f"border-right: 1px solid {mid.name()};"
+                f"border-bottom: 1px solid {mid.name()};"
+                "padding: 2px 6px;"
+                "font-weight: 500;"
+                "}"
+                "QTableCornerButton::section {"
+                f"background: {paper.name()};"
+                f"border: 0px;"
+                f"border-right: 1px solid {mid.name()};"
+                f"border-bottom: 1px solid {mid.name()};"
+                "}"
+                "QProgressBar {"
+                f"background: {self._blend_colors(base, mid, 0.10).name()};"
+                f"border: 1px solid {mid.name()};"
+                "border-radius: 6px;"
+                "padding: 1px;"
+                "}"
+                "QProgressBar::chunk {"
+                f"background: {highlight.name()};"
+                "border-radius: 4px;"
+                "}"
+                "QLineEdit, QComboBox, QSpinBox, QListWidget {"
+                f"background: {paper.name()};"
+                f"color: {text.name()};"
+                f"border: 1px solid {mid.name()};"
+                "border-radius: 6px;"
+                "padding: 6px 10px;"
+                "selection-background-color: " + highlight.name() + ";"
+                "selection-color: " + highlighted_text.name() + ";"
+                "}"
+                "QComboBox::drop-down {"
+                "border: 0px;"
+                "width: 24px;"
+                "}"
+                "QPushButton {"
+                f"background: {paper.name()};"
+                f"color: {text.name()};"
+                f"border: 1px solid {mid.name()};"
+                "border-radius: 6px;"
+                "padding: 7px 12px;"
+                "font-weight: 600;"
+                "}"
+                "QPushButton:hover {"
+                f"background: {self._blend_colors(base, highlight, 0.10).name()};"
+                "}"
+                "QPushButton:pressed {"
+                f"background: {self._blend_colors(base, highlight, 0.18).name()};"
+                "}"
+                "QDialog {"
+                f"background: {surface.name()};"
+                f"color: {text.name()};"
+                "}"
+            )
+            if window_stylesheet != self._last_window_stylesheet:
+                self.setStyleSheet(window_stylesheet)
+                self._last_window_stylesheet = window_stylesheet
+
+            table_stylesheet = (
+                "QTableView {"
+                f"border: {border_width}px solid {border_color.name()};"
+                f"background: {table_background.name()};"
+                f"alternate-background-color: {alternate.name()};"
+                f"color: {text.name()};"
+                f"gridline-color: {mid.name()};"
+                f"selection-background-color: {selection_background.name()};"
+                f"selection-color: {text.name()};"
+                "border-radius: 0px;"
+                "padding: 0px;"
+                "}"
+                "QTableView::item {"
+                "padding: 1px 3px;"
+                "border: 0px;"
+                "margin: 0px;"
+                "}"
+                "QTableView::item:selected {"
+                f"background: {selection_background.name()};"
+                f"color: {text.name()};"
+                "border: 0px;"
+                "outline: none;"
+                "}"
+                "QTableView::item:selected:active {"
+                f"background: {selection_background.name()};"
+                f"color: {text.name()};"
+                "border: 0px;"
+                "outline: none;"
+                "}"
+                "QTableView::item:focus { outline: none; }"
+            )
+            if table_stylesheet != self._last_table_stylesheet:
+                self.table_view.setStyleSheet(table_stylesheet)
+                self._last_table_stylesheet = table_stylesheet
+
+            self.model.refresh_colors()
+            self.menuBar().update()
+            self.statusBar().update()
+            self.table_view.horizontalHeader().viewport().update()
+            self.table_view.verticalHeader().viewport().update()
+            self.table_view.viewport().update()
+        finally:
+            self._applying_theme_styles = False
 
     @staticmethod
     def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:
@@ -1333,6 +1532,19 @@ class MainWindow(QMainWindow):
     def _is_color_dark(color: QColor) -> bool:
         luminance = (0.299 * color.red()) + (0.587 * color.green()) + (0.114 * color.blue())
         return luminance < 128
+
+    def _is_dark_theme(self) -> bool:
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                scheme = app.styleHints().colorScheme()
+                if scheme == Qt.ColorScheme.Dark:
+                    return True
+                if scheme == Qt.ColorScheme.Light:
+                    return False
+            except AttributeError:
+                pass
+        return self._is_color_dark(self.palette().color(QPalette.ColorRole.Base))
 
     def _reset_view_state(self, *, preserve_row_order: bool = False) -> None:
         self._pending_resort = False

@@ -6,6 +6,14 @@
 - 交互行の色分けと `兼用` `BANK` `欠番` の行色も、ライトテーマ / ダークテーマに応じて見やすい色へ追従するように変更
 - `区分` 列で既存値のあるセルをダブルクリックしたとき、プルダウンが二重に見えることがある問題を修正
 
+## 0.2.8 - 2026-04-14
+
+- Fixed dark/light theme switching so table, headers, and menu bar colors refresh consistently.
+- Updated alternating rows and status row colors for Shared, BANK, and Missing states.
+- Fixed row-wide color updates when changing the Status column.
+- Moved the drop hint to an overlay so the table no longer gains outer padding while dragging.
+- Tightened cell selection and inline editor spacing for a cleaner table layout.
+
 ## 0.2.7 - 2026-04-13
 - 空の CSV に動画ファイルをドロップしたとき、確認後に動画名からカットを仮登録して納品情報を反映できるように変更
 - 既存 CSV で一致しない動画があるとき、未一致ファイル名を一覧表示し、必要なら未一致分だけ仮登録できるように変更

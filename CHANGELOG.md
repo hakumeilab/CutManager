@@ -2,17 +2,13 @@
 
 ## Unreleased
 
-- ダークテーマ環境でも表の非選択時テキストが背景に埋もれないよう、表と選択色をアプリのパレットに追従する描画へ変更
-- 交互行の色分けと `兼用` `BANK` `欠番` の行色も、ライトテーマ / ダークテーマに応じて見やすい色へ追従するように変更
-- `区分` 列で既存値のあるセルをダブルクリックしたとき、プルダウンが二重に見えることがある問題を修正
-
 ## 0.2.8 - 2026-04-14
 
-- Fixed dark/light theme switching so table, headers, and menu bar colors refresh consistently.
-- Updated alternating rows and status row colors for Shared, BANK, and Missing states.
-- Fixed row-wide color updates when changing the Status column.
-- Moved the drop hint to an overlay so the table no longer gains outer padding while dragging.
-- Tightened cell selection and inline editor spacing for a cleaner table layout.
+- ダークテーマとライトテーマの切り替え時に、表、ヘッダー、メニューバーの配色が崩れないよう修正
+- 交互行と `兼用` `BANK` `欠番` の行色を、テーマに応じて見やすい配色に調整
+- `区分` を変更したときに、行全体の色が確実に反映されるよう描画処理を修正
+- ドロップヒントを表の上にオーバーレイ表示し、表の外周に余白が出ないよう修正
+- セル選択表示と通常セル編集時の余白を見直し、表の見た目を整理
 
 ## 0.2.7 - 2026-04-13
 - 空の CSV に動画ファイルをドロップしたとき、確認後に動画名からカットを仮登録して納品情報を反映できるように変更

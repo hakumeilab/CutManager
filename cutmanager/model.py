@@ -5,16 +5,10 @@ from dataclasses import dataclass
 import re
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication
 
-from .constants import (
-    COLUMN_AB_GROUP,
-    COLUMN_CUT_NUMBER,
-    COLUMN_STATUS,
-    CSV_HEADERS,
-    STATUS_ROW_BACKGROUND_HEX,
-    STATUS_ROW_FOREGROUND_HEX,
-)
+from .constants import COLUMN_AB_GROUP, COLUMN_CUT_NUMBER, COLUMN_STATUS, CSV_HEADERS
 from .folder_import import make_cut_key
 from .history import HistoryCommand, HistoryManager
 
@@ -230,6 +224,17 @@ class CutTableModel(QAbstractTableModel):
     def actual_row_count(self) -> int:
         return len(self._rows)
 
+    def refresh_colors(self) -> None:
+        if not self._rows:
+            return
+        top_left = self.index(0, 0)
+        bottom_right = self.index(len(self._rows) - 1, len(CSV_HEADERS) - 1)
+        self.dataChanged.emit(
+            top_left,
+            bottom_right,
+            [Qt.BackgroundRole, Qt.ForegroundRole],
+        )
+
     def is_modified(self) -> bool:
         return self._modified
 
@@ -378,11 +383,77 @@ class CutTableModel(QAbstractTableModel):
         )
 
     def _row_background_color(self, row: int) -> QColor | None:
+        palette = QApplication.palette()
+        base_color = self._base_row_color(row, palette)
         status = self._rows[row][COLUMN_STATUS].strip()
-        color = STATUS_ROW_BACKGROUND_HEX.get(status)
-        return QColor(color) if color else None
+        accent_color = self._status_accent_color(status)
+        if accent_color is None:
+            return base_color
+        mix_ratio = self._status_mix_ratio(status, palette)
+        return self._blend_colors(base_color, accent_color, mix_ratio)
 
     def _row_foreground_color(self, row: int) -> QColor | None:
+        palette = QApplication.palette()
+        background = self._row_background_color(row)
         status = self._rows[row][COLUMN_STATUS].strip()
-        color = STATUS_ROW_FOREGROUND_HEX.get(status)
-        return QColor(color) if color else None
+        if status != "欠番" or background is None:
+            return palette.color(QPalette.ColorRole.Text)
+        if self._is_color_dark(background):
+            return palette.color(QPalette.ColorRole.BrightText)
+        return palette.color(QPalette.ColorRole.Text)
+
+    @staticmethod
+    def _base_row_color(row: int, palette: QPalette) -> QColor:
+        if CutTableModel._is_dark_palette(palette):
+            # Reuse the docs dark palette so desktop and web mock feel consistent.
+            return QColor("#0f172a" if row % 2 == 0 else "#162033")
+        role = QPalette.ColorRole.Base if row % 2 == 0 else QPalette.ColorRole.AlternateBase
+        return palette.color(role)
+
+    @staticmethod
+    def _status_accent_color(status: str) -> QColor | None:
+        dark_mode = CutTableModel._is_dark_palette(QApplication.palette())
+        accent_by_status = (
+            {
+                "兼用": QColor("#22c55e"),
+                "BANK": QColor("#ef4444"),
+                "欠番": QColor("#1e3a8a"),
+            }
+            if dark_mode
+            else {
+                "兼用": QColor("#22c55e"),
+                "BANK": QColor("#ef4444"),
+                "欠番": QColor("#64748b"),
+            }
+        )
+        return accent_by_status.get(status)
+
+    @staticmethod
+    def _status_mix_ratio(status: str, palette: QPalette) -> float:
+        if not CutTableModel._is_dark_palette(palette):
+            return 0.28 if status == "欠番" else 0.18
+        dark_mix = {
+            "兼用": 0.22,
+            "BANK": 0.30,
+            "欠番": 0.50,
+        }
+        return dark_mix.get(status, 0.18)
+
+    @staticmethod
+    def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:
+        alpha = max(0.0, min(1.0, overlay_alpha))
+        inverse = 1.0 - alpha
+        return QColor(
+            round((base.red() * inverse) + (overlay.red() * alpha)),
+            round((base.green() * inverse) + (overlay.green() * alpha)),
+            round((base.blue() * inverse) + (overlay.blue() * alpha)),
+        )
+
+    @staticmethod
+    def _is_color_dark(color: QColor) -> bool:
+        luminance = (0.299 * color.red()) + (0.587 * color.green()) + (0.114 * color.blue())
+        return luminance < 128
+
+    @staticmethod
+    def _is_dark_palette(palette: QPalette) -> bool:
+        return CutTableModel._is_color_dark(palette.color(QPalette.ColorRole.Base))

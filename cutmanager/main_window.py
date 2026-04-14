@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDir, QPoint, QProcess, QSettings, QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtCore import QDate, QDir, QEvent, QPoint, QProcess, QSettings, QThread, QTimer, Qt, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         self._sort_order = Qt.SortOrder.AscendingOrder
         self._pending_resort = False
         self._skip_close_confirmation = False
+        self._drag_feedback_active = False
         self.settings = QSettings("CutManager", "CutManager")
         self.recent_files = self._load_recent_files()
 
@@ -205,16 +206,6 @@ class MainWindow(QMainWindow):
         self.drop_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_hint_label.setVisible(False)
         self.drop_hint_label.setText("ここに CSV / 素材フォルダー / 動画ファイルをドロップ")
-        self.drop_hint_label.setStyleSheet(
-            "QLabel {"
-            "padding: 8px 12px;"
-            "border: 1px dashed #2563eb;"
-            "background: #eff6ff;"
-            "color: #1d4ed8;"
-            "border-radius: 6px;"
-            "font-weight: 600;"
-            "}"
-        )
 
         self.table_view.setModel(self.proxy_model)
         self.table_view.setItemDelegate(CutItemDelegate(self.table_view))
@@ -223,7 +214,6 @@ class MainWindow(QMainWindow):
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.SelectedClicked
             | QAbstractItemView.EditTrigger.EditKeyPressed
             | QAbstractItemView.EditTrigger.AnyKeyPressed
         )
@@ -238,6 +228,7 @@ class MainWindow(QMainWindow):
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
         header.setSortIndicator(self._sort_column, self._sort_order)
+        self._apply_theme_styles()
 
         default_widths = [120, 90, 110, 100, 115, 90, 105, 115]
         for column, width in enumerate(default_widths):
@@ -1259,26 +1250,89 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _set_drag_feedback(self, active: bool) -> None:
+        self._drag_feedback_active = active
         self.drop_hint_label.setVisible(active)
-        border = "2px solid #2563eb" if active else "1px solid #cbd5e1"
-        background = "#f8fbff" if active else "white"
-        self.table_view.setStyleSheet(
-            "QTableView {"
-            f"border: {border};"
-            f"background: {background};"
-            "gridline-color: #dbe2ea;"
-            "selection-background-color: #ffe7a3;"
-            "selection-color: #111827;"
-            "}"
-            "QTableView::item:selected {"
-            "background: #ffe7a3;"
-            "color: #111827;"
-            "}"
-            "QTableView::item:selected:active {"
-            "background: #ffd56a;"
-            "color: #111827;"
+        self._apply_theme_styles()
+
+    def changeEvent(self, event) -> None:
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_theme_styles()
+        super().changeEvent(event)
+
+    def _apply_theme_styles(self) -> None:
+        palette = self.palette()
+        if self._is_color_dark(palette.color(QPalette.ColorRole.Base)):
+            # Reuse the docs dark theme colors.
+            base = QColor("#0f172a")
+            alternate = QColor("#162033")
+            text = QColor("#e5eefc")
+            highlight = QColor("#3b82f6")
+            highlighted_text = QColor("#eff6ff")
+            mid = QColor("#334155")
+            button = QColor("#172033")
+            button_text = QColor("#bfdbfe")
+        else:
+            base = palette.color(QPalette.ColorRole.Base)
+            alternate = palette.color(QPalette.ColorRole.AlternateBase)
+            text = palette.color(QPalette.ColorRole.Text)
+            highlight = palette.color(QPalette.ColorRole.Highlight)
+            highlighted_text = palette.color(QPalette.ColorRole.HighlightedText)
+            mid = palette.color(QPalette.ColorRole.Mid)
+            button = palette.color(QPalette.ColorRole.Button)
+            button_text = palette.color(QPalette.ColorRole.ButtonText)
+
+        border_color = highlight if self._drag_feedback_active else mid
+        border_width = 2 if self._drag_feedback_active else 1
+        table_background = self._blend_colors(base, highlight, 0.08) if self._drag_feedback_active else base
+        hint_background = self._blend_colors(button, highlight, 0.18)
+        hint_text = highlight if self._is_color_dark(hint_background) == self._is_color_dark(highlight) else button_text
+
+        self.drop_hint_label.setStyleSheet(
+            "QLabel {"
+            "padding: 8px 12px;"
+            f"border: 1px dashed {border_color.name()};"
+            f"background: {hint_background.name()};"
+            f"color: {hint_text.name()};"
+            "border-radius: 6px;"
+            "font-weight: 600;"
             "}"
         )
+
+        self.table_view.setStyleSheet(
+            "QTableView {"
+            f"border: {border_width}px solid {border_color.name()};"
+            f"background: {table_background.name()};"
+            f"alternate-background-color: {alternate.name()};"
+            f"color: {text.name()};"
+            f"gridline-color: {mid.name()};"
+            f"selection-background-color: {highlight.name()};"
+            f"selection-color: {highlighted_text.name()};"
+            "}"
+            "QTableView::item:selected {"
+            f"background: {highlight.name()};"
+            f"color: {highlighted_text.name()};"
+            "}"
+            "QTableView::item:selected:active {"
+            f"background: {highlight.name()};"
+            f"color: {highlighted_text.name()};"
+            "}"
+        )
+        self.model.refresh_colors()
+
+    @staticmethod
+    def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:
+        alpha = max(0.0, min(1.0, overlay_alpha))
+        inverse = 1.0 - alpha
+        return QColor(
+            round((base.red() * inverse) + (overlay.red() * alpha)),
+            round((base.green() * inverse) + (overlay.green() * alpha)),
+            round((base.blue() * inverse) + (overlay.blue() * alpha)),
+        )
+
+    @staticmethod
+    def _is_color_dark(color: QColor) -> bool:
+        luminance = (0.299 * color.red()) + (0.587 * color.green()) + (0.114 * color.blue())
+        return luminance < 128
 
     def _reset_view_state(self, *, preserve_row_order: bool = False) -> None:
         self._pending_resort = False

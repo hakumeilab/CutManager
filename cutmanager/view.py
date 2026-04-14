@@ -35,6 +35,10 @@ class CellEditorLineEdit(QLineEdit):
 class StatusEditorComboBox(QComboBox):
     confirmRequested = Signal()
 
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAutoFillBackground(True)
+
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.confirmRequested.emit()
@@ -78,6 +82,15 @@ class CutItemDelegate(QStyledItemDelegate):
             return
         super().setModelData(editor, model, index)
 
+    def paint(self, painter, option, index) -> None:
+        if index.column() == COLUMN_STATUS and self._is_editing_index(index):
+            option_copy = type(option)(option)
+            option_copy.text = ""
+            self.drawBackground(painter, option_copy, index)
+            self.drawFocus(painter, option_copy, option_copy.rect)
+            return
+        super().paint(painter, option, index)
+
     def current_editor(self) -> QWidget | None:
         return self._active_editor
 
@@ -94,6 +107,15 @@ class CutItemDelegate(QStyledItemDelegate):
 
     def _clear_active_editor(self, *_args) -> None:
         self._active_editor = None
+
+    def _is_editing_index(self, index) -> bool:
+        if self._active_editor is None:
+            return False
+        row_value = self._active_editor.property("_cutmanager_row")
+        column_value = self._active_editor.property("_cutmanager_column")
+        if row_value is None or column_value is None:
+            return False
+        return int(row_value) == index.row() and int(column_value) == index.column()
 
 
 class FilterHeaderView(QHeaderView):

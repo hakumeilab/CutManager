@@ -65,11 +65,12 @@ def apply_videos_to_rows(
             failed_count += 1
             continue
 
+        file_key = str(video_path.resolve(strict=False)).casefold()
+        file_unmatched = False
         for cut_identifier in metadata.cut_identifiers:
             row_index = row_by_cut.get(cut_identifier.key)
             if row_index is None:
-                unmatched_count += 1
-                file_key = str(video_path.resolve(strict=False)).casefold()
+                file_unmatched = True
                 if file_key not in unmatched_file_keys:
                     unmatched_file_keys.add(file_key)
                     unmatched_files.append(video_path.name)
@@ -82,6 +83,8 @@ def apply_videos_to_rows(
             row[COLUMN_TAKE_NUMBER] = metadata.take_number
             row[COLUMN_DELIVERY_DATE] = delivery_date
             updated_count += 1
+        if file_unmatched:
+            unmatched_count += 1
 
     return VideoImportResult(
         rows=updated_rows,

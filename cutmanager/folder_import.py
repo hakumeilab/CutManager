@@ -189,6 +189,9 @@ def apply_material_updates(rows: list[list[str]], updates: list[MaterialRowUpdat
 
 
 def _iter_candidate_folders(root: Path) -> list[Path]:
+    if extract_cut_identifiers(root.name):
+        return [root]
+
     child_folders = sorted(
         (entry for entry in root.iterdir() if entry.is_dir()),
         key=lambda entry: entry.name.casefold(),

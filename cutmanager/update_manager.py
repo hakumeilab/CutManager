@@ -221,13 +221,6 @@ def _is_packaged_runtime() -> bool:
 
 
 def _prepare_executable_update(downloaded_path: Path) -> PreparedUpdate:
-    return PreparedUpdate(
-        launch_program=str(downloaded_path),
-        launch_arguments=[],
-        mode="installer",
-        downloaded_path=downloaded_path,
-    )
-
     if not can_apply_update_in_place():
         return PreparedUpdate(
             launch_program=str(downloaded_path),
@@ -523,15 +516,37 @@ def _build_update_script(
         f"$stageDir = '{stage_text}'\n"
         f"$targetDir = '{target_text}'\n"
         f"$relativeExe = '{relative_executable_text}'\n"
+        "function Sync-CutManagerDirectory {\n"
+        "    param(\n"
+        "        [string]$SourceDir,\n"
+        "        [string]$DestinationDir\n"
+        "    )\n"
+        "    New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null\n"
+        "    $sourceItems = @{}\n"
+        "    Get-ChildItem -LiteralPath $SourceDir -Force | ForEach-Object {\n"
+        "        $sourceItems[$_.Name] = $_\n"
+        "    }\n"
+        "    Get-ChildItem -LiteralPath $DestinationDir -Force | ForEach-Object {\n"
+        "        if (-not $sourceItems.ContainsKey($_.Name)) {\n"
+        "            Remove-Item -LiteralPath $_.FullName -Recurse -Force\n"
+        "        }\n"
+        "    }\n"
+        "    foreach ($entry in $sourceItems.GetEnumerator()) {\n"
+        "        $sourcePath = $entry.Value.FullName\n"
+        "        $destinationPath = Join-Path $DestinationDir $entry.Key\n"
+        "        if ($entry.Value.PSIsContainer) {\n"
+        "            Sync-CutManagerDirectory -SourceDir $sourcePath -DestinationDir $destinationPath\n"
+        "            continue\n"
+        "        }\n"
+        "        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force\n"
+        "    }\n"
+        "}\n"
         "for ($i = 0; $i -lt 120; $i++) {\n"
         "    $proc = Get-Process -Id $processIdToWait -ErrorAction SilentlyContinue\n"
         "    if (-not $proc) { break }\n"
         "    Start-Sleep -Milliseconds 500\n"
         "}\n"
-        "New-Item -ItemType Directory -Path $targetDir -Force | Out-Null\n"
-        "Get-ChildItem -LiteralPath $stageDir -Force | ForEach-Object {\n"
-        "    Copy-Item -LiteralPath $_.FullName -Destination $targetDir -Recurse -Force\n"
-        "}\n"
+        "Sync-CutManagerDirectory -SourceDir $stageDir -DestinationDir $targetDir\n"
         "$targetExe = Join-Path $targetDir $relativeExe\n"
         "Start-Sleep -Milliseconds 300\n"
         "Start-Process -FilePath $targetExe\n"

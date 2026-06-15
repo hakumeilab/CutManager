@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette
+from PySide6.QtCore import QDate, QEvent, QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemDelegate,
     QAbstractItemView,
     QComboBox,
+    QDateEdit,
     QHeaderView,
     QLineEdit,
     QStyledItemDelegate,
@@ -18,7 +19,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .constants import COLUMN_STATUS, STATUS_OPTIONS
+from .constants import (
+    BG_LOAD_COUNT_OPTIONS,
+    COLUMN_BG_DATE,
+    COLUMN_BG_LOAD_COUNT,
+    COLUMN_DELIVERY_DATE,
+    COLUMN_STATUS,
+    COLUMN_TP_DATE,
+    COLUMN_TP_LOAD_COUNT,
+    STATUS_OPTIONS,
+    TP_LOAD_COUNT_OPTIONS,
+)
 
 
 class CellEditorLineEdit(QLineEdit):
@@ -38,11 +49,29 @@ class CellEditorLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
-class StatusEditorComboBox(QComboBox):
+class CandidateEditorComboBox(QComboBox):
+    confirmRequested = Signal()
+
+    def __init__(self, parent=None, *, editable: bool = False) -> None:
+        super().__init__(parent)
+        self.setAutoFillBackground(True)
+        self.setEditable(editable)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.confirmRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class CalendarEditor(QDateEdit):
     confirmRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setCalendarPopup(True)
+        self.setDisplayFormat("yyyy/MM/dd")
         self.setAutoFillBackground(True)
 
     def keyPressEvent(self, event) -> None:
@@ -59,12 +88,17 @@ class CutItemDelegate(QStyledItemDelegate):
         self._active_editor: QWidget | None = None
 
     def createEditor(self, parent, option, index):
-        if index.column() == COLUMN_STATUS:
-            editor = StatusEditorComboBox(parent)
-            editor.addItems(STATUS_OPTIONS)
+        if self._candidate_options(index.column()) is not None:
+            options = self._candidate_options(index.column()) or ()
+            editor = CandidateEditorComboBox(parent, editable=index.column() != COLUMN_STATUS)
+            editor.addItems(options)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
             editor.activated.connect(lambda *_args: self._commit_and_close(editor, move_down=True))
             QTimer.singleShot(0, editor.showPopup)
+        elif self._is_date_column(index.column()):
+            editor = CalendarEditor(parent)
+            editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
+            QTimer.singleShot(0, editor.calendarWidget().show)
         else:
             editor = CellEditorLineEdit(parent)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
@@ -79,7 +113,17 @@ class CutItemDelegate(QStyledItemDelegate):
         if isinstance(editor, QComboBox):
             value = str(index.data(Qt.ItemDataRole.EditRole) or "")
             combo_index = editor.findText(value)
-            editor.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+            if combo_index >= 0:
+                editor.setCurrentIndex(combo_index)
+            elif editor.isEditable():
+                editor.setEditText(value)
+            else:
+                editor.setCurrentIndex(0)
+            return
+        if isinstance(editor, QDateEdit):
+            value = str(index.data(Qt.ItemDataRole.EditRole) or "").strip()
+            date = QDate.fromString(value, "yyyy/MM/dd")
+            editor.setDate(date if date.isValid() else QDate.currentDate())
             return
         super().setEditorData(editor, index)
 
@@ -87,11 +131,15 @@ class CutItemDelegate(QStyledItemDelegate):
         if isinstance(editor, QComboBox):
             model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
             return
+        if isinstance(editor, QDateEdit):
+            model.setData(index, editor.date().toString("yyyy/MM/dd"), Qt.ItemDataRole.EditRole)
+            return
         super().setModelData(editor, model, index)
 
     def paint(self, painter, option, index) -> None:
         option_copy = type(option)(option)
         self.initStyleOption(option_copy, index)
+        indicator_option = type(option_copy)(option_copy)
 
         background = index.data(Qt.ItemDataRole.BackgroundRole)
         if isinstance(background, QColor):
@@ -111,9 +159,13 @@ class CutItemDelegate(QStyledItemDelegate):
         option_copy.state &= ~QStyle.StateFlag.State_Selected
         option_copy.state &= ~QStyle.StateFlag.State_HasFocus
 
-        if index.column() == COLUMN_STATUS and self._is_editing_index(index):
+        if self._is_candidate_column(index.column()) and self._is_editing_index(index):
             option_copy.text = ""
+        elif self._is_candidate_column(index.column()):
+            option_copy.rect = option_copy.rect.adjusted(0, 0, -18, 0)
         super().paint(painter, option_copy, index)
+        if self._is_candidate_column(index.column()) and not self._is_editing_index(index):
+            self._paint_candidate_indicator(painter, indicator_option)
 
     def current_editor(self) -> QWidget | None:
         return self._active_editor
@@ -140,6 +192,45 @@ class CutItemDelegate(QStyledItemDelegate):
         if row_value is None or column_value is None:
             return False
         return int(row_value) == index.row() and int(column_value) == index.column()
+
+    @staticmethod
+    def _candidate_options(column: int) -> tuple[str, ...] | None:
+        if column == COLUMN_STATUS:
+            return STATUS_OPTIONS
+        if column == COLUMN_TP_LOAD_COUNT:
+            return TP_LOAD_COUNT_OPTIONS
+        if column == COLUMN_BG_LOAD_COUNT:
+            return BG_LOAD_COUNT_OPTIONS
+        return None
+
+    @classmethod
+    def _is_candidate_column(cls, column: int) -> bool:
+        return cls._candidate_options(column) is not None
+
+    @staticmethod
+    def _is_date_column(column: int) -> bool:
+        return column in (COLUMN_TP_DATE, COLUMN_BG_DATE, COLUMN_DELIVERY_DATE)
+
+    @staticmethod
+    def _paint_candidate_indicator(painter, option) -> None:
+        rect = option.rect
+        if rect.width() < 18 or rect.height() < 14:
+            return
+
+        palette = option.palette
+        icon_color = palette.color(QPalette.ColorRole.Mid)
+        center = QPoint(rect.right() - 9, rect.center().y())
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(icon_color)
+        pen.setWidth(1)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(center + QPoint(-3, -2), center + QPoint(0, 1))
+        painter.drawLine(center + QPoint(0, 1), center + QPoint(3, -2))
+        painter.restore()
 
     @staticmethod
     def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:

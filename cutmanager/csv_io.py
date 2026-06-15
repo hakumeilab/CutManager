@@ -7,6 +7,13 @@ from pathlib import Path
 from .constants import COLUMN_STATUS, CSV_HEADERS, LEGACY_STATUS_HEADERS
 
 
+LEGACY_HEADER_ALIASES = {
+    "TP入れ回数": ("素材入れ回数",),
+    "TP入れ日": ("素材入れ日",),
+}
+OPTIONAL_BACKFILL_HEADERS = {"BG入れ回数", "BG入れ日"}
+
+
 class CsvLoadError(Exception):
     pass
 
@@ -40,7 +47,7 @@ def load_csv_file(path: str) -> CsvLoadResult:
                 raise CsvLoadError("1 行目のヘッダーが空です。")
 
             header_map = {name: index for index, name in enumerate(source_header) if name}
-            column_indexes = [header_map.get(header) for header in CSV_HEADERS]
+            column_indexes = [_resolve_header_index(header_map, header) for header in CSV_HEADERS]
             legacy_status_indexes = [header_map.get(header) for header in LEGACY_STATUS_HEADERS]
 
             missing_headers = []
@@ -48,6 +55,8 @@ def load_csv_file(path: str) -> CsvLoadResult:
                 if column_indexes[index] is not None:
                     continue
                 if index == COLUMN_STATUS and any(legacy_index is not None for legacy_index in legacy_status_indexes):
+                    continue
+                if header in OPTIONAL_BACKFILL_HEADERS:
                     continue
                 missing_headers.append(header)
             if missing_headers:
@@ -96,6 +105,17 @@ def _map_source_row(
     if not normalized_row[COLUMN_STATUS]:
         normalized_row[COLUMN_STATUS] = _resolve_legacy_status(source_row, legacy_status_indexes)
     return normalized_row
+
+
+def _resolve_header_index(header_map: dict[str, int], header: str) -> int | None:
+    column_index = header_map.get(header)
+    if column_index is not None:
+        return column_index
+    for alias in LEGACY_HEADER_ALIASES.get(header, ()):
+        column_index = header_map.get(alias)
+        if column_index is not None:
+            return column_index
+    return None
 
 
 def _resolve_legacy_status(source_row: list[str], legacy_status_indexes: list[int | None]) -> str:

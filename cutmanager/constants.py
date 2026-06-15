@@ -4,8 +4,10 @@ CSV_HEADERS = [
     "カット番号",
     "AB分け",
     "区分",
-    "素材入れ回数",
-    "素材入れ日",
+    "TP入れ回数",
+    "TP入れ日",
+    "BG入れ回数",
+    "BG入れ日",
     "テイク",
     "テイク番号",
     "納品日",
@@ -14,13 +16,20 @@ CSV_HEADERS = [
 COLUMN_CUT_NUMBER = 0
 COLUMN_AB_GROUP = 1
 COLUMN_STATUS = 2
-COLUMN_MATERIAL_LOAD_COUNT = 3
-COLUMN_MATERIAL_DATE = 4
-COLUMN_TAKE = 5
-COLUMN_TAKE_NUMBER = 6
-COLUMN_DELIVERY_DATE = 7
+COLUMN_TP_LOAD_COUNT = 3
+COLUMN_TP_DATE = 4
+COLUMN_BG_LOAD_COUNT = 5
+COLUMN_BG_DATE = 6
+COLUMN_TAKE = 7
+COLUMN_TAKE_NUMBER = 8
+COLUMN_DELIVERY_DATE = 9
+
+COLUMN_MATERIAL_LOAD_COUNT = COLUMN_TP_LOAD_COUNT
+COLUMN_MATERIAL_DATE = COLUMN_TP_DATE
 
 STATUS_OPTIONS = ("", "兼用", "BANK", "欠番")
+TP_LOAD_COUNT_OPTIONS = ("", "BGOnly", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
+BG_LOAD_COUNT_OPTIONS = ("", "全セル", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
 LEGACY_STATUS_HEADERS = ("兼用", "BANK", "欠番")
 STATUS_ROW_BACKGROUND_HEX = {
     "欠番": "#4b5563",
@@ -43,4 +52,9 @@ VIDEO_FILE_EXTENSIONS = {
     ".avi",
     ".wmv",
     ".m4v",
+}
+
+BG_FILE_EXTENSIONS = {
+    ".psd",
+    ".psb",
 }

@@ -5,14 +5,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import (
+    BG_FILE_EXTENSIONS,
     COLUMN_AB_GROUP,
+    COLUMN_BG_DATE,
+    COLUMN_BG_LOAD_COUNT,
     COLUMN_CUT_NUMBER,
     COLUMN_DELIVERY_DATE,
-    COLUMN_MATERIAL_DATE,
-    COLUMN_MATERIAL_LOAD_COUNT,
     COLUMN_STATUS,
     COLUMN_TAKE,
     COLUMN_TAKE_NUMBER,
+    COLUMN_TP_DATE,
+    COLUMN_TP_LOAD_COUNT,
     CSV_HEADERS,
 )
 
@@ -45,8 +48,10 @@ class MaterialRowUpdate:
     cut_number: str
     ab_group: str
     mark_compatible: bool
-    material_load_increment: int
-    material_date: str
+    tp_load_increment: int
+    tp_date: str
+    bg_load_increment: int
+    bg_date: str
 
     @property
     def key(self) -> tuple[str, str]:
@@ -110,20 +115,21 @@ def build_rows_from_dropped_folders(
 
     for folder_path in folder_paths:
         root = Path(folder_path)
-        if not root.is_dir():
-            raise ValueError(f"フォルダーが存在しません: {root}")
+        if not root.is_dir() and not root.is_file():
+            raise ValueError(f"素材が存在しません: {root}")
 
-        for candidate in _iter_candidate_folders(root):
+        for candidate in _iter_candidate_materials(root):
             folder_key = str(candidate.resolve(strict=False)).casefold()
             if folder_key in seen_folders:
                 continue
             seen_folders.add(folder_key)
 
-            cut_identifiers = extract_cut_identifiers(candidate.name)
+            cut_identifiers = extract_cut_identifiers(_candidate_name(candidate))
             if not cut_identifiers:
                 failed_count += 1
                 continue
 
+            is_bg = is_bg_material(candidate)
             is_compatible = len(cut_identifiers) > 1
             for cut_identifier in cut_identifiers:
                 cut_key = cut_identifier.key
@@ -134,23 +140,33 @@ def build_rows_from_dropped_folders(
                             cut_number=cut_identifier.cut_number,
                             ab_group=cut_identifier.ab_group,
                             mark_compatible=is_compatible,
-                            material_load_increment=1,
-                            material_date=import_date,
+                            tp_load_increment=0 if is_bg else 1,
+                            tp_date="" if is_bg else import_date,
+                            bg_load_increment=1 if is_bg else 0,
+                            bg_date=import_date if is_bg else "",
                         )
                     else:
                         update.mark_compatible = update.mark_compatible or is_compatible
-                        update.material_load_increment += 1
-                        update.material_date = import_date
+                        if is_bg:
+                            update.bg_load_increment += 1
+                            update.bg_date = import_date
+                        else:
+                            update.tp_load_increment += 1
+                            update.tp_date = import_date
                     continue
 
                 row = rows_by_cut.get(cut_key)
                 if row is None:
-                    rows_by_cut[cut_key] = _build_material_row(cut_identifier, import_date, is_compatible)
+                    rows_by_cut[cut_key] = _build_material_row(cut_identifier, import_date, is_compatible, is_bg)
                     continue
 
                 row[COLUMN_STATUS] = "兼用" if is_compatible else row[COLUMN_STATUS]
-                row[COLUMN_MATERIAL_LOAD_COUNT] = str(_parse_material_load_count(row[COLUMN_MATERIAL_LOAD_COUNT]) + 1)
-                row[COLUMN_MATERIAL_DATE] = import_date
+                if is_bg:
+                    row[COLUMN_BG_LOAD_COUNT] = str(_parse_load_count(row[COLUMN_BG_LOAD_COUNT]) + 1)
+                    row[COLUMN_BG_DATE] = import_date
+                else:
+                    row[COLUMN_TP_LOAD_COUNT] = str(_parse_load_count(row[COLUMN_TP_LOAD_COUNT]) + 1)
+                    row[COLUMN_TP_DATE] = import_date
 
     return FolderImportResult(
         rows=list(rows_by_cut.values()),
@@ -163,9 +179,9 @@ def build_rows_from_dropped_folders(
 
 def apply_material_updates(rows: list[list[str]], updates: list[MaterialRowUpdate]) -> list[list[str]]:
     if not updates:
-        return [row.copy() for row in rows]
+        return [_normalize_row(row) for row in rows]
 
-    updated_rows = [row.copy() for row in rows]
+    updated_rows = [_normalize_row(row) for row in rows]
     row_by_cut = {
         make_cut_key(row[COLUMN_CUT_NUMBER], row[COLUMN_AB_GROUP]): index
         for index, row in enumerate(updated_rows)
@@ -180,39 +196,63 @@ def apply_material_updates(rows: list[list[str]], updates: list[MaterialRowUpdat
         row = updated_rows[row_index]
         if update.mark_compatible:
             row[COLUMN_STATUS] = "兼用"
-        row[COLUMN_MATERIAL_LOAD_COUNT] = str(
-            _parse_material_load_count(row[COLUMN_MATERIAL_LOAD_COUNT]) + update.material_load_increment
-        )
-        row[COLUMN_MATERIAL_DATE] = update.material_date
+        if update.tp_load_increment:
+            row[COLUMN_TP_LOAD_COUNT] = str(_parse_load_count(row[COLUMN_TP_LOAD_COUNT]) + update.tp_load_increment)
+            row[COLUMN_TP_DATE] = update.tp_date
+        if update.bg_load_increment:
+            row[COLUMN_BG_LOAD_COUNT] = str(_parse_load_count(row[COLUMN_BG_LOAD_COUNT]) + update.bg_load_increment)
+            row[COLUMN_BG_DATE] = update.bg_date
 
     return updated_rows
 
 
-def _iter_candidate_folders(root: Path) -> list[Path]:
+def is_bg_material(path: str | Path) -> bool:
+    return Path(path).is_file() and Path(path).suffix.casefold() in BG_FILE_EXTENSIONS
+
+
+def _iter_candidate_materials(root: Path) -> list[Path]:
+    if root.is_file():
+        return [root]
+
     if extract_cut_identifiers(root.name):
         return [root]
 
-    child_folders = sorted(
-        (entry for entry in root.iterdir() if entry.is_dir()),
+    child_materials = sorted(
+        (entry for entry in root.iterdir() if entry.is_dir() or is_bg_material(entry)),
         key=lambda entry: entry.name.casefold(),
     )
-    return child_folders if child_folders else [root]
+    return child_materials if child_materials else [root]
 
 
-def _build_material_row(cut_identifier: CutIdentifier, import_date: str, is_compatible: bool) -> list[str]:
+def _candidate_name(path: Path) -> str:
+    if is_bg_material(path):
+        return path.stem
+    return path.name
+
+
+def _build_material_row(
+    cut_identifier: CutIdentifier,
+    import_date: str,
+    is_compatible: bool,
+    is_bg: bool,
+) -> list[str]:
     row = [""] * len(CSV_HEADERS)
     row[COLUMN_CUT_NUMBER] = cut_identifier.cut_number
     row[COLUMN_AB_GROUP] = cut_identifier.ab_group
     row[COLUMN_STATUS] = "兼用" if is_compatible else ""
-    row[COLUMN_MATERIAL_LOAD_COUNT] = "1"
-    row[COLUMN_MATERIAL_DATE] = import_date
+    if is_bg:
+        row[COLUMN_BG_LOAD_COUNT] = "1"
+        row[COLUMN_BG_DATE] = import_date
+    else:
+        row[COLUMN_TP_LOAD_COUNT] = "1"
+        row[COLUMN_TP_DATE] = import_date
     row[COLUMN_TAKE] = ""
     row[COLUMN_TAKE_NUMBER] = ""
     row[COLUMN_DELIVERY_DATE] = ""
     return row
 
 
-def _parse_material_load_count(value: str) -> int:
+def _parse_load_count(value: str) -> int:
     text = str(value or "").strip()
     if not text:
         return 0
@@ -220,3 +260,10 @@ def _parse_material_load_count(value: str) -> int:
         return int(text)
     except ValueError:
         return 0
+
+
+def _normalize_row(row: list[str]) -> list[str]:
+    normalized = [""] * len(CSV_HEADERS)
+    for index in range(min(len(row), len(CSV_HEADERS))):
+        normalized[index] = "" if row[index] is None else str(row[index])
+    return normalized

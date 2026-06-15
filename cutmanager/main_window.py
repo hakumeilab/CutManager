@@ -2,13 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDir, QEvent, QPoint, QProcess, QSettings, QThread, QTimer, Qt, QUrl
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QDate,
+    QDir,
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QProcess,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    QSettings,
+    QThread,
+    QTimer,
+    Qt,
+    QUrl,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QDialog,
     QFileDialog,
+    QGridLayout,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
@@ -16,15 +33,23 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QProgressDialog,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .constants import (
+    BG_FILE_EXTENSIONS,
+    COLUMN_BG_DATE,
+    COLUMN_BG_LOAD_COUNT,
     COLUMN_CUT_NUMBER,
+    COLUMN_DELIVERY_DATE,
     CSV_FILE_FILTER,
     CSV_HEADERS,
     IMPORT_DATE_FORMAT,
+    COLUMN_STATUS,
+    COLUMN_TP_DATE,
+    COLUMN_TP_LOAD_COUNT,
     VIDEO_FILE_EXTENSIONS,
     WINDOW_SIZE,
     WINDOW_TITLE,
@@ -49,6 +74,82 @@ from .update_manager import (
 )
 from .video_import import apply_videos_to_rows, build_rows_from_video_files
 from .view import CutItemDelegate, CutTableView, FilterHeaderView
+
+
+def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
+    total_cuts = 0
+    delivered = 0
+    total_tp = 0
+    tp_done = 0
+    total_bg = 0
+    bg_done = 0
+    remaining_tp = 0
+    remaining_bg = 0
+    remaining_delivery = 0
+    shared = 0
+    bank = 0
+    missing = 0
+
+    for row in rows:
+        normalized_row = _normalize_summary_row(row)
+        status = normalized_row[COLUMN_STATUS].strip()
+        if status == "欠番":
+            missing += 1
+            continue
+
+        total_cuts += 1
+        if status == "兼用":
+            shared += 1
+        if status == "BANK":
+            bank += 1
+            continue
+
+        if normalized_row[COLUMN_DELIVERY_DATE].strip():
+            delivered += 1
+        else:
+            remaining_delivery += 1
+
+        tp_value = normalized_row[COLUMN_TP_LOAD_COUNT].strip()
+        bg_value = normalized_row[COLUMN_BG_LOAD_COUNT].strip()
+        tp_required = tp_value != "BGOnly"
+        bg_required = bg_value != "全セル"
+
+        if tp_required:
+            total_tp += 1
+        if bg_required:
+            total_bg += 1
+
+        if tp_required and tp_value:
+            tp_done += 1
+        elif tp_required:
+            remaining_tp += 1
+
+        if bg_required and bg_value:
+            bg_done += 1
+        elif bg_required:
+            remaining_bg += 1
+
+    return {
+        "total_cuts": total_cuts,
+        "delivered": delivered,
+        "remaining_delivery": remaining_delivery,
+        "total_tp": total_tp,
+        "tp_done": tp_done,
+        "remaining_tp": remaining_tp,
+        "total_bg": total_bg,
+        "bg_done": bg_done,
+        "remaining_bg": remaining_bg,
+        "shared": shared,
+        "bank": bank,
+        "missing": missing,
+    }
+
+
+def _normalize_summary_row(row: list[str]) -> list[str]:
+    normalized = [""] * len(CSV_HEADERS)
+    for index in range(min(len(row), len(CSV_HEADERS))):
+        normalized[index] = "" if row[index] is None else str(row[index])
+    return normalized
 
 
 class MainWindow(QMainWindow):
@@ -86,6 +187,10 @@ class MainWindow(QMainWindow):
         self.row_count_label = QLabel(self)
         self.modified_label = QLabel(self)
         self.drop_result_label = QLabel(self)
+        self.summary_labels: dict[str, QLabel] = {}
+        self.summary_ribbon_body: QWidget | None = None
+        self.summary_toggle_button: QToolButton | None = None
+        self.summary_animation: QParallelAnimationGroup | None = None
         self.drop_progress_bar = QProgressBar(self)
         self.file_menu = QMenu("ファイル", self)
         self.edit_menu = QMenu("編集", self)
@@ -210,7 +315,7 @@ class MainWindow(QMainWindow):
 
         self.drop_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_hint_label.setVisible(False)
-        self.drop_hint_label.setText("ここに CSV / 素材フォルダー / 動画ファイルをドロップ")
+        self.drop_hint_label.setText("ここに CSV / 素材フォルダー / PSD / 動画ファイルをドロップ")
 
         self.table_view.setModel(self.proxy_model)
         self.table_view.setItemDelegate(CutItemDelegate(self.table_view))
@@ -236,7 +341,7 @@ class MainWindow(QMainWindow):
         header.setSortIndicator(self._sort_column, self._sort_order)
         self._apply_theme_styles()
 
-        default_widths = [120, 90, 110, 100, 115, 90, 105, 115]
+        default_widths = [120, 90, 110, 105, 115, 105, 115, 90, 105, 115]
         for column, width in enumerate(default_widths):
             self.table_view.setColumnWidth(column, width)
 
@@ -247,6 +352,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addWidget(self._build_summary_ribbon())
         layout.addWidget(self.table_view, 1)
         self.setCentralWidget(container)
         self.drop_hint_label.setParent(self.table_view.viewport())
@@ -323,6 +429,7 @@ class MainWindow(QMainWindow):
         self.model.modifiedChanged.connect(self._update_all_status)
         self.model.actualRowCountChanged.connect(self._update_all_status)
         self.model.contentChanged.connect(self._schedule_resort)
+        self.model.contentChanged.connect(lambda *_: self._update_all_status())
         self.model.modelReset.connect(self._update_all_status)
         self.model.rowsInserted.connect(lambda *_: self._update_all_status())
         self.model.rowsRemoved.connect(lambda *_: self._update_all_status())
@@ -370,6 +477,128 @@ class MainWindow(QMainWindow):
 
         self.modified_label.setText("状態: 未保存" if self.model.is_modified() else "状態: 保存済み")
         self.drop_result_label.setText(f"D&D: {self.last_drop_summary}")
+        self._update_summary_ribbon()
+
+    def _build_summary_ribbon(self) -> QWidget:
+        ribbon = QWidget(self)
+        ribbon.setObjectName("summaryRibbon")
+        outer_layout = QVBoxLayout(ribbon)
+        outer_layout.setContentsMargins(10, 8, 10, 8)
+        outer_layout.setSpacing(6)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        self.summary_toggle_button = QToolButton(ribbon)
+        self.summary_toggle_button.setObjectName("summaryToggleButton")
+        self.summary_toggle_button.setCheckable(True)
+        self.summary_toggle_button.setChecked(True)
+        self.summary_toggle_button.setText("^")
+        self.summary_toggle_button.setToolTip("リボンを閉じる")
+        self.summary_toggle_button.setFixedSize(18, 18)
+        self.summary_toggle_button.clicked.connect(self._toggle_summary_ribbon)
+        header_layout.addWidget(self.summary_toggle_button)
+        header_layout.addStretch(1)
+        outer_layout.addLayout(header_layout)
+
+        body = QWidget(ribbon)
+        body.setObjectName("summaryRibbonBody")
+        self.summary_ribbon_body = body
+        layout = QGridLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        metric_positions = (
+            ("total_cuts", "総カット数", 0, 0),
+            ("delivered", "納品済み", 0, 1),
+            ("remaining_delivery", "残り納品", 0, 2),
+            ("total_tp", "総TP数", 1, 0),
+            ("tp_done", "TP入れ", 1, 1),
+            ("remaining_tp", "残りTP数", 1, 2),
+            ("total_bg", "総BG数", 2, 0),
+            ("bg_done", "BG入れ", 2, 1),
+            ("remaining_bg", "残りBG数", 2, 2),
+            ("shared", "兼用カット", 0, 3),
+            ("bank", "BANK数", 1, 3),
+            ("missing", "欠番数", 2, 3),
+        )
+        for key, title, row, column in metric_positions:
+            label = QLabel(ribbon)
+            label.setObjectName("summaryMetric")
+            label.setMinimumWidth(118)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setProperty("title", title)
+            if key in {"shared", "bank", "missing"}:
+                label.setProperty("statusKind", key)
+            self.summary_labels[key] = label
+            layout.addWidget(label, row, column)
+
+        layout.setColumnStretch(4, 1)
+        outer_layout.addWidget(body)
+        QTimer.singleShot(0, lambda body=body: body.setMaximumHeight(body.sizeHint().height()))
+        return ribbon
+
+    def _toggle_summary_ribbon(self) -> None:
+        if self.summary_ribbon_body is None or self.summary_toggle_button is None:
+            return
+        visible = self.summary_toggle_button.isChecked()
+        self._animate_summary_ribbon(visible)
+        self.summary_toggle_button.setText("^" if visible else "v")
+        self.summary_toggle_button.setToolTip("リボンを閉じる" if visible else "リボンを開く")
+
+    def _animate_summary_ribbon(self, visible: bool) -> None:
+        if self.summary_ribbon_body is None:
+            return
+        if self.summary_animation is not None and self.summary_animation.state() == QAbstractAnimation.State.Running:
+            self.summary_animation.stop()
+
+        body = self.summary_ribbon_body
+        expanded_height = body.sizeHint().height()
+        if visible:
+            body.setVisible(True)
+            start_height = max(0, body.maximumHeight())
+            end_height = expanded_height
+        else:
+            start_height = body.height()
+            end_height = 0
+
+        animation_group = QParallelAnimationGroup(self)
+        for property_name in (b"minimumHeight", b"maximumHeight"):
+            animation = QPropertyAnimation(body, property_name, animation_group)
+            animation.setDuration(220)
+            animation.setStartValue(start_height)
+            animation.setEndValue(end_height)
+            animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            animation_group.addAnimation(animation)
+
+        animation_group.finished.connect(
+            lambda body=body, visible=visible, height=expanded_height: self._finish_summary_animation(body, visible, height)
+        )
+        self.summary_animation = animation_group
+        animation_group.start()
+
+    def _finish_summary_animation(self, body: QWidget, visible: bool, expanded_height: int) -> None:
+        if not visible:
+            body.setVisible(False)
+        body.setMinimumHeight(0)
+        body.setMaximumHeight(expanded_height if visible else 0)
+
+    def _update_summary_ribbon(self) -> None:
+        if not self.summary_labels:
+            return
+
+        stats = self._calculate_cut_summary()
+        for key, value in stats.items():
+            label = self.summary_labels.get(key)
+            if label is None:
+                continue
+            title = str(label.property("title") or "")
+            label.setText(f"{title}: {value}")
+
+    def _calculate_cut_summary(self) -> dict[str, int]:
+        return calculate_cut_summary(self.model.rows())
 
     def _open_column_popup(self, column: int) -> None:
         values = self.model.unique_column_values(column)
@@ -1018,13 +1247,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "ドロップ不可",
-                "CSV ファイル 1 件、素材フォルダー、または動画ファイルをドロップしてください。",
+                "CSV ファイル 1 件、素材フォルダー、PSD/PSB ファイル、または動画ファイルをドロップしてください。",
             )
             return False
 
         progress_message = {
             "csv": "CSV を開いています...",
-            "folders": "素材フォルダーを取り込んでいます...",
+            "folders": "素材を取り込んでいます...",
             "videos": "動画情報を反映しています...",
         }[drop_type]
 
@@ -1045,7 +1274,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "保存先が未設定です",
-                "素材フォルダーを取り込む前に、新規 CSV の保存先を指定しますか。",
+                "素材を取り込む前に、新規 CSV の保存先を指定しますか。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
@@ -1078,9 +1307,7 @@ class MainWindow(QMainWindow):
             )
             self._update_sort_indicator()
 
-        self.last_drop_summary = (
-            f"素材追加 {result.added_count} / 既存更新 {result.updated_count} / 抽出失敗 {result.failed_count}"
-        )
+        self.last_drop_summary = f"素材追加 {result.added_count} / 既存更新 {result.updated_count} / 抽出失敗 {result.failed_count}"
         self.statusBar().showMessage(self.last_drop_summary, 7000)
         self._update_status_labels()
         return True
@@ -1359,6 +1586,45 @@ class MainWindow(QMainWindow):
                 "}"
                 "QWidget#mainContainer {"
                 f"background: {surface.name()};"
+                "}"
+                "QWidget#summaryRibbon {"
+                f"background: {paper.name()};"
+                f"border-bottom: 1px solid {self._blend_colors(mid, base, 0.35).name()};"
+                "}"
+                "QWidget#summaryRibbonBody {"
+                f"background: {paper.name()};"
+                "}"
+                "QLabel#summaryMetric {"
+                f"background: {self._blend_colors(base, highlight, 0.08).name()};"
+                f"color: {text.name()};"
+                f"border: 1px solid {self._blend_colors(mid, base, 0.20).name()};"
+                "border-radius: 6px;"
+                "padding: 6px 8px;"
+                "font-weight: 600;"
+                "}"
+                "QLabel#summaryMetric[statusKind=\"shared\"] {"
+                f"background: {self._blend_colors(base, QColor('#22c55e'), 0.22 if self._is_dark_theme() else 0.18).name()};"
+                f"color: {text.name()};"
+                "}"
+                "QLabel#summaryMetric[statusKind=\"bank\"] {"
+                f"background: {self._blend_colors(base, QColor('#ef4444'), 0.30 if self._is_dark_theme() else 0.18).name()};"
+                f"color: {text.name()};"
+                "}"
+                "QLabel#summaryMetric[statusKind=\"missing\"] {"
+                f"background: {self._blend_colors(base, QColor('#1e3a8a' if self._is_dark_theme() else '#64748b'), 0.50 if self._is_dark_theme() else 0.28).name()};"
+                f"color: {(highlighted_text if self._is_dark_theme() else text).name()};"
+                "}"
+                "QToolButton#summaryToggleButton {"
+                "background: transparent;"
+                f"color: {muted.name()};"
+                "border: 0px;"
+                "border-radius: 0px;"
+                "padding: 0px;"
+                "font-weight: 600;"
+                "}"
+                "QToolButton#summaryToggleButton:hover {"
+                "background: transparent;"
+                f"color: {text.name()};"
                 "}"
                 "QMenuBar {"
                 f"background: {paper.name()};"
@@ -1714,12 +1980,16 @@ class MainWindow(QMainWindow):
             return "unsupported"
 
         csv_paths = [path for path in paths if path.is_file() and path.suffix.casefold() == ".csv"]
-        folder_paths = [path for path in paths if path.is_dir()]
+        material_paths = [
+            path
+            for path in paths
+            if path.is_dir() or (path.is_file() and path.suffix.casefold() in BG_FILE_EXTENSIONS)
+        ]
         video_paths = [path for path in paths if path.is_file() and path.suffix.casefold() in VIDEO_FILE_EXTENSIONS]
 
         if len(csv_paths) == 1 and len(paths) == 1:
             return "csv"
-        if folder_paths and len(folder_paths) == len(paths):
+        if material_paths and len(material_paths) == len(paths):
             return "folders"
         if video_paths and len(video_paths) == len(paths):
             return "videos"

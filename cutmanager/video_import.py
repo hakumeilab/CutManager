@@ -51,7 +51,7 @@ def apply_videos_to_rows(
     rows: list[list[str]],
     delivery_date: str,
 ) -> VideoImportResult:
-    updated_rows = [row.copy() for row in rows]
+    updated_rows = [_normalize_row(row) for row in rows]
     row_by_cut = _build_row_map(updated_rows)
     updated_count = 0
     unmatched_count = 0
@@ -202,3 +202,10 @@ def _build_video_row(cut_identifier: CutIdentifier, metadata: VideoMetadata, del
     row[COLUMN_TAKE_NUMBER] = metadata.take_number
     row[COLUMN_DELIVERY_DATE] = delivery_date
     return row
+
+
+def _normalize_row(row: list[str]) -> list[str]:
+    normalized = [""] * len(CSV_HEADERS)
+    for index in range(min(len(row), len(CSV_HEADERS))):
+        normalized[index] = "" if row[index] is None else str(row[index])
+    return normalized

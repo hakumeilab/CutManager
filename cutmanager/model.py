@@ -8,7 +8,15 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-from .constants import COLUMN_AB_GROUP, COLUMN_CUT_NUMBER, COLUMN_STATUS, CSV_HEADERS, STATUS_OPTIONS
+from .constants import (
+    COLUMN_AB_GROUP,
+    COLUMN_BG_LOAD_COUNT,
+    COLUMN_CUT_NUMBER,
+    COLUMN_STATUS,
+    COLUMN_TP_LOAD_COUNT,
+    CSV_HEADERS,
+    STATUS_OPTIONS,
+)
 from .folder_import import make_cut_key
 from .history import HistoryCommand, HistoryManager
 
@@ -94,9 +102,15 @@ class CutTableModel(QAbstractTableModel):
             return self._rows[index.row()][index.column()]
 
         if role == Qt.BackgroundRole:
+            special_background = self._special_count_cell_background(index.row(), index.column())
+            if special_background is not None:
+                return special_background
             return self._row_background_color(index.row())
 
         if role == Qt.ForegroundRole:
+            special_foreground = self._special_count_cell_foreground(index.row(), index.column())
+            if special_foreground is not None:
+                return special_foreground
             return self._row_foreground_color(index.row())
 
         return None
@@ -314,7 +328,7 @@ class CutTableModel(QAbstractTableModel):
             self._rows[change.row][change.column] = value
             changed_cells[change.row].add(change.column)
             changed_columns.add(change.column)
-            if change.column == COLUMN_STATUS:
+            if change.column in (COLUMN_STATUS, COLUMN_TP_LOAD_COUNT, COLUMN_BG_LOAD_COUNT):
                 rows_requiring_full_repaint.add(change.row)
 
         if not changed_cells:
@@ -395,6 +409,17 @@ class CutTableModel(QAbstractTableModel):
         mix_ratio = self._status_mix_ratio(status, palette)
         return self._blend_colors(base_color, accent_color, mix_ratio)
 
+    def _special_count_cell_background(self, row: int, column: int) -> QColor | None:
+        if not self._is_special_count_cell(row, column):
+            return None
+        palette = QApplication.palette()
+        base_color = self._base_row_color(row, palette)
+        accent_color = self._status_accent_color(STATUS_MISSING)
+        if accent_color is None:
+            return None
+        mix_ratio = self._status_mix_ratio(STATUS_MISSING, palette)
+        return self._blend_colors(base_color, accent_color, mix_ratio)
+
     def _row_foreground_color(self, row: int) -> QColor | None:
         palette = QApplication.palette()
         background = self._row_background_color(row)
@@ -404,6 +429,24 @@ class CutTableModel(QAbstractTableModel):
         if self._is_color_dark(background):
             return palette.color(QPalette.ColorRole.BrightText)
         return palette.color(QPalette.ColorRole.Text)
+
+    def _special_count_cell_foreground(self, row: int, column: int) -> QColor | None:
+        background = self._special_count_cell_background(row, column)
+        if background is None:
+            return None
+        palette = QApplication.palette()
+        if self._is_color_dark(background):
+            return palette.color(QPalette.ColorRole.BrightText)
+        return palette.color(QPalette.ColorRole.Text)
+
+    def _is_special_count_cell(self, row: int, column: int) -> bool:
+        if not 0 <= row < len(self._rows):
+            return False
+        if column == COLUMN_TP_LOAD_COUNT:
+            return self._rows[row][column].strip() == "BGOnly"
+        if column == COLUMN_BG_LOAD_COUNT:
+            return self._rows[row][column].strip() == "全セル"
+        return False
 
     @staticmethod
     def _base_row_color(row: int, palette: QPalette) -> QColor:

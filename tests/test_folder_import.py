@@ -4,6 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cutmanager.constants import (
+    COLUMN_AB_GROUP,
+    COLUMN_BG_DATE,
+    COLUMN_BG_LOAD_COUNT,
+    COLUMN_CUT_NUMBER,
+    COLUMN_TP_DATE,
+    COLUMN_TP_LOAD_COUNT,
+)
 from cutmanager.folder_import import apply_material_updates, build_rows_from_dropped_folders
 
 
@@ -19,7 +27,10 @@ class FolderImportTests(unittest.TestCase):
 
         self.assertEqual(result.added_count, 2)
         self.assertEqual(result.failed_count, 0)
-        self.assertEqual({(row[0], row[1]) for row in result.rows}, {("001", ""), ("002", "A")})
+        self.assertEqual(
+            {(row[COLUMN_CUT_NUMBER], row[COLUMN_AB_GROUP]) for row in result.rows},
+            {("001", ""), ("002", "A")},
+        )
 
     def test_single_cut_folder_is_imported_even_if_it_contains_children(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -32,8 +43,8 @@ class FolderImportTests(unittest.TestCase):
 
         self.assertEqual(result.added_count, 1)
         self.assertEqual(result.failed_count, 0)
-        self.assertEqual(result.rows[0][0], "123")
-        self.assertEqual(result.rows[0][1], "A")
+        self.assertEqual(result.rows[0][COLUMN_CUT_NUMBER], "123")
+        self.assertEqual(result.rows[0][COLUMN_AB_GROUP], "A")
 
     def test_psd_file_is_imported_as_bg(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -44,11 +55,11 @@ class FolderImportTests(unittest.TestCase):
 
         self.assertEqual(result.added_count, 1)
         self.assertEqual(result.failed_count, 0)
-        self.assertEqual(result.rows[0][0], "345")
-        self.assertEqual(result.rows[0][3], "")
-        self.assertEqual(result.rows[0][4], "")
-        self.assertEqual(result.rows[0][5], "1")
-        self.assertEqual(result.rows[0][6], "2026/04/16")
+        self.assertEqual(result.rows[0][COLUMN_CUT_NUMBER], "345")
+        self.assertEqual(result.rows[0][COLUMN_TP_LOAD_COUNT], "")
+        self.assertEqual(result.rows[0][COLUMN_TP_DATE], "")
+        self.assertEqual(result.rows[0][COLUMN_BG_LOAD_COUNT], "1")
+        self.assertEqual(result.rows[0][COLUMN_BG_DATE], "2026/04/16")
 
     def test_psd_file_updates_existing_bg_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -56,15 +67,15 @@ class FolderImportTests(unittest.TestCase):
             bg_file.write_bytes(b"psd")
 
             result = build_rows_from_dropped_folders([bg_file], {("345", "")}, "2026/04/16")
-            rows = [["345", "", "", "1", "2026/04/15", "2", "2026/04/15", "", "", ""]]
+            rows = [["345", "", "", "", "1", "2026/04/15", "2", "2026/04/15", "", "", ""]]
             updated_rows = apply_material_updates(rows, result.updates)
 
         self.assertEqual(result.added_count, 0)
         self.assertEqual(result.updated_count, 1)
-        self.assertEqual(updated_rows[0][3], "1")
-        self.assertEqual(updated_rows[0][4], "2026/04/15")
-        self.assertEqual(updated_rows[0][5], "3")
-        self.assertEqual(updated_rows[0][6], "2026/04/16")
+        self.assertEqual(updated_rows[0][COLUMN_TP_LOAD_COUNT], "1")
+        self.assertEqual(updated_rows[0][COLUMN_TP_DATE], "2026/04/15")
+        self.assertEqual(updated_rows[0][COLUMN_BG_LOAD_COUNT], "3")
+        self.assertEqual(updated_rows[0][COLUMN_BG_DATE], "2026/04/16")
 
 
 if __name__ == "__main__":

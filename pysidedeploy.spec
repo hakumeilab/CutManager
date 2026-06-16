@@ -16,7 +16,7 @@ exec_directory = .
 project_file = 
 
 # application icon
-icon =
+icon = assets/cutmanager_icon.ico
 
 [python]
 

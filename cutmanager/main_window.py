@@ -3,22 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QAbstractAnimation,
     QDate,
     QDir,
-    QEasingCurve,
     QEvent,
     QPoint,
     QProcess,
-    QParallelAnimationGroup,
-    QPropertyAnimation,
     QSettings,
     QThread,
     QTimer,
     Qt,
     QUrl,
+    Signal,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QPalette
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -30,10 +38,10 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QProgressDialog,
     QStatusBar,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -152,10 +160,68 @@ def _normalize_summary_row(row: list[str]) -> list[str]:
     return normalized
 
 
+class RibbonToggleButton(QWidget):
+    clicked = Signal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+        self._checked = True
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, checked: bool) -> None:
+        if self._checked == checked:
+            return
+        self._checked = checked
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit(self._checked)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        palette = self.palette()
+        icon_color = palette.color(QPalette.ColorRole.Mid)
+        center = self.rect().center()
+        y_offset = 1 if self._checked else -1
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(icon_color)
+        pen.setWidth(1)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        if self._checked:
+            painter.drawLine(center + QPoint(-3, 1 + y_offset), center + QPoint(0, -2 + y_offset))
+            painter.drawLine(center + QPoint(0, -2 + y_offset), center + QPoint(3, 1 + y_offset))
+        else:
+            painter.drawLine(center + QPoint(-3, -2 + y_offset), center + QPoint(0, 1 + y_offset))
+            painter.drawLine(center + QPoint(0, 1 + y_offset), center + QPoint(3, -2 + y_offset))
+
+
+class RibbonToggleRow(QWidget):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     MAX_RECENT_FILES = 8
     LAST_SESSION_FILE_KEY = "lastSessionFile"
     UNDO_LIMIT_KEY = "undoLimit"
+    EPISODE_MEMO_PREFIX = "episodeMemo/"
+    HEADER_STATE_KEY = "tableHeaderState"
     DEFAULT_UNDO_LIMIT = 100
 
     def __init__(self) -> None:
@@ -172,6 +238,7 @@ class MainWindow(QMainWindow):
         self._applying_theme_styles = False
         self._last_window_stylesheet = ""
         self._last_table_stylesheet = ""
+        self._restoring_header_state = False
         self.settings = QSettings("CutManager", "CutManager")
         self.recent_files = self._load_recent_files()
 
@@ -188,9 +255,11 @@ class MainWindow(QMainWindow):
         self.modified_label = QLabel(self)
         self.drop_result_label = QLabel(self)
         self.summary_labels: dict[str, QLabel] = {}
+        self.summary_ribbon_clip: QWidget | None = None
         self.summary_ribbon_body: QWidget | None = None
-        self.summary_toggle_button: QToolButton | None = None
-        self.summary_animation: QParallelAnimationGroup | None = None
+        self.summary_toggle_button: RibbonToggleButton | None = None
+        self.summary_memo_edit: QPlainTextEdit | None = None
+        self._updating_summary_memo = False
         self.drop_progress_bar = QProgressBar(self)
         self.file_menu = QMenu("ファイル", self)
         self.edit_menu = QMenu("編集", self)
@@ -215,6 +284,7 @@ class MainWindow(QMainWindow):
         self.add_row_above_action: QAction
         self.add_row_below_action: QAction
         self.delete_row_action: QAction
+        self.clear_values_action: QAction
         self.preferences_action: QAction
         self.restore_default_sort_action: QAction
         self.check_updates_action: QAction
@@ -266,7 +336,7 @@ class MainWindow(QMainWindow):
 
         self.add_row_action = QAction("行追加", self)
         self.add_row_action.setShortcut(QKeySequence("Insert"))
-        self.add_row_action.triggered.connect(self.add_row)
+        self.add_row_action.triggered.connect(lambda checked=False: self.add_row())
 
         self.add_row_above_action = QAction("上に行を追加", self)
         self.add_row_above_action.triggered.connect(self.add_row_above)
@@ -277,6 +347,9 @@ class MainWindow(QMainWindow):
         self.delete_row_action = QAction("行削除", self)
         self.delete_row_action.setShortcut(QKeySequence("Ctrl+Delete"))
         self.delete_row_action.triggered.connect(self.delete_selected_rows)
+
+        self.clear_values_action = QAction("値を削除", self)
+        self.clear_values_action.triggered.connect(self.clear_selected_cells)
 
         self.preferences_action = QAction("環境設定", self)
         self.preferences_action.triggered.connect(self.open_settings_dialog)
@@ -301,6 +374,7 @@ class MainWindow(QMainWindow):
             self.add_row_above_action,
             self.add_row_below_action,
             self.delete_row_action,
+            self.clear_values_action,
             self.preferences_action,
             self.restore_default_sort_action,
             self.check_updates_action,
@@ -337,13 +411,16 @@ class MainWindow(QMainWindow):
         self.table_view.setHorizontalHeader(header)
         header.setStretchLastSection(False)
         header.setSectionsClickable(True)
+        header.setSectionsMovable(True)
         header.setSortIndicatorShown(True)
         header.setSortIndicator(self._sort_column, self._sort_order)
+        header.sectionMoved.connect(self._save_header_state)
         self._apply_theme_styles()
 
-        default_widths = [120, 90, 110, 105, 115, 105, 115, 90, 105, 115]
+        default_widths = [120, 180, 90, 110, 105, 115, 105, 115, 90, 105, 115]
         for column, width in enumerate(default_widths):
             self.table_view.setColumnWidth(column, width)
+        self._restore_header_state()
 
         self._set_drag_feedback(False)
 
@@ -428,7 +505,6 @@ class MainWindow(QMainWindow):
 
         self.model.modifiedChanged.connect(self._update_all_status)
         self.model.actualRowCountChanged.connect(self._update_all_status)
-        self.model.contentChanged.connect(self._schedule_resort)
         self.model.contentChanged.connect(lambda *_: self._update_all_status())
         self.model.modelReset.connect(self._update_all_status)
         self.model.rowsInserted.connect(lambda *_: self._update_all_status())
@@ -453,6 +529,7 @@ class MainWindow(QMainWindow):
     def _update_all_status(self) -> None:
         self._update_window_title()
         self._update_status_labels()
+        self._update_summary_memo()
         self.table_view.horizontalHeader().set_filtered_columns(self.proxy_model.filtered_columns())
 
     def _update_window_title(self) -> None:
@@ -485,24 +562,30 @@ class MainWindow(QMainWindow):
         outer_layout = QVBoxLayout(ribbon)
         outer_layout.setContentsMargins(10, 8, 10, 8)
         outer_layout.setSpacing(6)
+        outer_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        header_layout = QHBoxLayout()
+        header_row = RibbonToggleRow(ribbon)
+        header_row.setObjectName("summaryToggleRow")
+        header_row.setFixedHeight(18)
+        header_row.clicked.connect(self._toggle_summary_ribbon)
+        header_layout = QHBoxLayout(header_row)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
 
-        self.summary_toggle_button = QToolButton(ribbon)
+        self.summary_toggle_button = RibbonToggleButton(ribbon)
         self.summary_toggle_button.setObjectName("summaryToggleButton")
-        self.summary_toggle_button.setCheckable(True)
         self.summary_toggle_button.setChecked(True)
-        self.summary_toggle_button.setText("^")
         self.summary_toggle_button.setToolTip("リボンを閉じる")
-        self.summary_toggle_button.setFixedSize(18, 18)
-        self.summary_toggle_button.clicked.connect(self._toggle_summary_ribbon)
+        self.summary_toggle_button.clicked.connect(lambda *_: self._toggle_summary_ribbon())
         header_layout.addWidget(self.summary_toggle_button)
         header_layout.addStretch(1)
-        outer_layout.addLayout(header_layout)
+        outer_layout.addWidget(header_row, 0, Qt.AlignmentFlag.AlignTop)
 
-        body = QWidget(ribbon)
+        clip = QWidget(ribbon)
+        clip.setObjectName("summaryRibbonClip")
+        self.summary_ribbon_clip = clip
+
+        body = QWidget(clip)
         body.setObjectName("summaryRibbonBody")
         self.summary_ribbon_body = body
         layout = QGridLayout(body)
@@ -535,55 +618,61 @@ class MainWindow(QMainWindow):
             self.summary_labels[key] = label
             layout.addWidget(label, row, column)
 
+        memo_edit = QPlainTextEdit(body)
+        memo_edit.setObjectName("summaryMemo")
+        memo_edit.setPlaceholderText("メモ")
+        memo_edit.setMinimumWidth(220)
+        memo_edit.setMaximumHeight(88)
+        memo_edit.textChanged.connect(self._commit_summary_memo)
+        self.summary_memo_edit = memo_edit
+        layout.addWidget(memo_edit, 0, 4, 3, 1)
+
         layout.setColumnStretch(4, 1)
-        outer_layout.addWidget(body)
-        QTimer.singleShot(0, lambda body=body: body.setMaximumHeight(body.sizeHint().height()))
+        outer_layout.addWidget(clip)
+        QTimer.singleShot(0, self._initialize_summary_ribbon_body_geometry)
         return ribbon
 
     def _toggle_summary_ribbon(self) -> None:
-        if self.summary_ribbon_body is None or self.summary_toggle_button is None:
+        if self.summary_ribbon_clip is None or self.summary_ribbon_body is None or self.summary_toggle_button is None:
             return
-        visible = self.summary_toggle_button.isChecked()
-        self._animate_summary_ribbon(visible)
-        self.summary_toggle_button.setText("^" if visible else "v")
+        visible = not self.summary_toggle_button.isChecked()
+        self.summary_toggle_button.setChecked(visible)
+        self._set_summary_ribbon_visible(visible)
+        self.summary_toggle_button.update()
         self.summary_toggle_button.setToolTip("リボンを閉じる" if visible else "リボンを開く")
 
-    def _animate_summary_ribbon(self, visible: bool) -> None:
-        if self.summary_ribbon_body is None:
+    def _set_summary_ribbon_visible(self, visible: bool) -> None:
+        if self.summary_ribbon_clip is None or self.summary_ribbon_body is None:
             return
-        if self.summary_animation is not None and self.summary_animation.state() == QAbstractAnimation.State.Running:
-            self.summary_animation.stop()
-
+        clip = self.summary_ribbon_clip
         body = self.summary_ribbon_body
         expanded_height = body.sizeHint().height()
         if visible:
+            clip.setVisible(True)
             body.setVisible(True)
-            start_height = max(0, body.maximumHeight())
-            end_height = expanded_height
+            self._set_summary_ribbon_body_geometry(expanded_height)
+            clip.setMinimumHeight(expanded_height)
+            clip.setMaximumHeight(expanded_height)
+            body.move(0, 0)
         else:
-            start_height = body.height()
-            end_height = 0
+            clip.setMinimumHeight(0)
+            clip.setMaximumHeight(0)
+            body.move(0, -expanded_height)
+            clip.setVisible(False)
 
-        animation_group = QParallelAnimationGroup(self)
-        for property_name in (b"minimumHeight", b"maximumHeight"):
-            animation = QPropertyAnimation(body, property_name, animation_group)
-            animation.setDuration(220)
-            animation.setStartValue(start_height)
-            animation.setEndValue(end_height)
-            animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            animation_group.addAnimation(animation)
+    def _initialize_summary_ribbon_body_geometry(self) -> None:
+        if self.summary_ribbon_clip is None or self.summary_ribbon_body is None:
+            return
+        height = self.summary_ribbon_body.sizeHint().height()
+        self.summary_ribbon_clip.setMinimumHeight(height)
+        self.summary_ribbon_clip.setMaximumHeight(height)
+        self._set_summary_ribbon_body_geometry(height)
 
-        animation_group.finished.connect(
-            lambda body=body, visible=visible, height=expanded_height: self._finish_summary_animation(body, visible, height)
-        )
-        self.summary_animation = animation_group
-        animation_group.start()
-
-    def _finish_summary_animation(self, body: QWidget, visible: bool, expanded_height: int) -> None:
-        if not visible:
-            body.setVisible(False)
-        body.setMinimumHeight(0)
-        body.setMaximumHeight(expanded_height if visible else 0)
+    def _set_summary_ribbon_body_geometry(self, height: int) -> None:
+        if self.summary_ribbon_clip is None or self.summary_ribbon_body is None:
+            return
+        width = max(self.summary_ribbon_clip.width(), self.summary_ribbon_body.sizeHint().width())
+        self.summary_ribbon_body.setGeometry(0, self.summary_ribbon_body.y(), width, height)
 
     def _update_summary_ribbon(self) -> None:
         if not self.summary_labels:
@@ -599,6 +688,37 @@ class MainWindow(QMainWindow):
 
     def _calculate_cut_summary(self) -> dict[str, int]:
         return calculate_cut_summary(self.model.rows())
+
+    def _update_summary_memo(self) -> None:
+        if self.summary_memo_edit is None:
+            return
+
+        memo = self._load_episode_memo()
+
+        self._updating_summary_memo = True
+        try:
+            if self.summary_memo_edit.toPlainText() != memo:
+                self.summary_memo_edit.setPlainText(memo)
+            self.summary_memo_edit.setEnabled(True)
+        finally:
+            self._updating_summary_memo = False
+
+    def _commit_summary_memo(self) -> None:
+        if self._updating_summary_memo or self.summary_memo_edit is None:
+            return
+        self.settings.setValue(self._episode_memo_key(), self.summary_memo_edit.toPlainText())
+        self.settings.sync()
+
+    def _load_episode_memo(self) -> str:
+        value = self.settings.value(self._episode_memo_key(), "")
+        return "" if value is None else str(value)
+
+    def _episode_memo_key(self) -> str:
+        if self.current_file_path:
+            path_key = self._normalize_recent_path(self.current_file_path).replace("\\", "/")
+        else:
+            path_key = "__unsaved__"
+        return f"{self.EPISODE_MEMO_PREFIX}{path_key}"
 
     def _open_column_popup(self, column: int) -> None:
         values = self.model.unique_column_values(column)
@@ -681,6 +801,49 @@ class MainWindow(QMainWindow):
             self._sort_column == COLUMN_CUT_NUMBER
             and self._sort_order == Qt.SortOrder.AscendingOrder
         )
+
+    def _restore_header_state(self) -> None:
+        header = self.table_view.horizontalHeader()
+        self._restoring_header_state = True
+        try:
+            stored_state = self.settings.value(self.HEADER_STATE_KEY)
+            if stored_state is not None:
+                if header.restoreState(stored_state):
+                    return
+            self._apply_default_header_order()
+        finally:
+            self._restoring_header_state = False
+
+    def _apply_default_header_order(self) -> None:
+        header = self.table_view.horizontalHeader()
+        default_order = [
+            "カット番号",
+            "AB分け",
+            "区分",
+            "メモ",
+            "TP入れ回数",
+            "TP入れ日",
+            "BG入れ回数",
+            "BG入れ日",
+            "テイク",
+            "テイク番号",
+            "納品日",
+        ]
+        for target_visual_index, header_name in enumerate(default_order):
+            try:
+                logical_index = CSV_HEADERS.index(header_name)
+            except ValueError:
+                continue
+            current_visual_index = header.visualIndex(logical_index)
+            if current_visual_index != target_visual_index:
+                header.moveSection(current_visual_index, target_visual_index)
+        self._save_header_state()
+
+    def _save_header_state(self, *_args) -> None:
+        if self._restoring_header_state:
+            return
+        self.settings.setValue(self.HEADER_STATE_KEY, self.table_view.horizontalHeader().saveState())
+        self.settings.sync()
 
     def _schedule_resort(self, changed_columns: list[int]) -> None:
         if self._sort_column not in changed_columns or self._pending_resort:
@@ -793,7 +956,9 @@ class MainWindow(QMainWindow):
             return False
 
         previous_path = self.current_file_path
+        previous_episode_memo = self._load_episode_memo()
         self._set_current_file_path(target_path)
+        self.settings.setValue(self._episode_memo_key(), previous_episode_memo)
         if not self.save_csv():
             self._set_current_file_path(previous_path)
             self._update_all_status()
@@ -801,11 +966,13 @@ class MainWindow(QMainWindow):
         return True
 
     def add_row(self, insert_at: int | None = None) -> None:
+        if isinstance(insert_at, bool):
+            insert_at = None
         if insert_at is None:
             current_index = self.table_view.currentIndex()
             if current_index.isValid():
                 source_index = self.proxy_model.mapToSource(current_index)
-                insert_at = source_index.row() + 1 if source_index.isValid() else self.model.actual_row_count()
+                insert_at = source_index.row() if source_index.isValid() else self.model.actual_row_count()
             else:
                 insert_at = self.model.actual_row_count()
 
@@ -957,10 +1124,15 @@ class MainWindow(QMainWindow):
         has_reference_row = self._context_row_insert_position(offset=0) is not None
         self.add_row_above_action.setEnabled(has_reference_row)
         self.add_row_below_action.setEnabled(True)
+        self.clear_values_action.setEnabled(has_selection)
+        self.delete_row_action.setEnabled(bool(self._selected_source_rows()))
 
         menu = QMenu(self)
         menu.addAction(self.copy_action)
         menu.addAction(self.paste_action)
+        menu.addSeparator()
+        menu.addAction(self.clear_values_action)
+        menu.addAction(self.delete_row_action)
         menu.addSeparator()
         menu.addAction(self.add_row_above_action)
         menu.addAction(self.add_row_below_action)
@@ -1594,6 +1766,9 @@ class MainWindow(QMainWindow):
                 "QWidget#summaryRibbonBody {"
                 f"background: {paper.name()};"
                 "}"
+                "QWidget#summaryRibbonClip {"
+                f"background: {paper.name()};"
+                "}"
                 "QLabel#summaryMetric {"
                 f"background: {self._blend_colors(base, highlight, 0.08).name()};"
                 f"color: {text.name()};"
@@ -1614,7 +1789,15 @@ class MainWindow(QMainWindow):
                 f"background: {self._blend_colors(base, QColor('#1e3a8a' if self._is_dark_theme() else '#64748b'), 0.50 if self._is_dark_theme() else 0.28).name()};"
                 f"color: {(highlighted_text if self._is_dark_theme() else text).name()};"
                 "}"
-                "QToolButton#summaryToggleButton {"
+                "QPlainTextEdit#summaryMemo {"
+                f"background: {paper.name()};"
+                f"color: {text.name()};"
+                f"border: 1px solid {self._blend_colors(mid, base, 0.20).name()};"
+                "border-radius: 6px;"
+                "padding: 6px 8px;"
+                "font-weight: 500;"
+                "}"
+                "QWidget#summaryToggleButton {"
                 "background: transparent;"
                 f"color: {muted.name()};"
                 "border: 0px;"
@@ -1622,7 +1805,7 @@ class MainWindow(QMainWindow):
                 "padding: 0px;"
                 "font-weight: 600;"
                 "}"
-                "QToolButton#summaryToggleButton:hover {"
+                "QWidget#summaryToggleButton:hover {"
                 "background: transparent;"
                 f"color: {text.name()};"
                 "}"
@@ -1704,7 +1887,7 @@ class MainWindow(QMainWindow):
                 f"background: {highlight.name()};"
                 "border-radius: 4px;"
                 "}"
-                "QLineEdit, QComboBox, QSpinBox, QListWidget {"
+                "QLineEdit, QComboBox, QSpinBox, QListWidget, QPlainTextEdit {"
                 f"background: {paper.name()};"
                 f"color: {text.name()};"
                 f"border: 1px solid {mid.name()};"
@@ -1736,6 +1919,7 @@ class MainWindow(QMainWindow):
                 f"color: {text.name()};"
                 "}"
             )
+            window_styles_changed = window_stylesheet != self._last_window_stylesheet
             if window_stylesheet != self._last_window_stylesheet:
                 self.setStyleSheet(window_stylesheet)
                 self._last_window_stylesheet = window_stylesheet
@@ -1771,16 +1955,19 @@ class MainWindow(QMainWindow):
                 "}"
                 "QTableView::item:focus { outline: none; }"
             )
+            table_styles_changed = table_stylesheet != self._last_table_stylesheet
             if table_stylesheet != self._last_table_stylesheet:
                 self.table_view.setStyleSheet(table_stylesheet)
                 self._last_table_stylesheet = table_stylesheet
 
-            self.model.refresh_colors()
-            self.menuBar().update()
-            self.statusBar().update()
-            self.table_view.horizontalHeader().viewport().update()
-            self.table_view.verticalHeader().viewport().update()
-            self.table_view.viewport().update()
+            if window_styles_changed or table_styles_changed:
+                self.model.refresh_colors()
+            if window_styles_changed:
+                self.menuBar().update()
+                self.statusBar().update()
+            if table_styles_changed:
+                self.table_view.horizontalHeader().viewport().update()
+                self.table_view.verticalHeader().viewport().update()
         finally:
             self._applying_theme_styles = False
 

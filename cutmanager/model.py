@@ -77,6 +77,10 @@ class CutTableModel(QAbstractTableModel):
         self._rows = [self._normalize_row(row) for row in (rows or [])]
         self._modified = False
         self._history: HistoryManager | None = None
+        self._row_background_cache: dict[int, QColor | None] = {}
+        self._row_foreground_cache: dict[int, QColor | None] = {}
+        self._special_background_cache: dict[tuple[int, int], QColor | None] = {}
+        self._special_foreground_cache: dict[tuple[int, int], QColor | None] = {}
 
     def set_history_manager(self, history: HistoryManager | None) -> None:
         self._history = history
@@ -102,16 +106,10 @@ class CutTableModel(QAbstractTableModel):
             return self._rows[index.row()][index.column()]
 
         if role == Qt.BackgroundRole:
-            special_background = self._special_count_cell_background(index.row(), index.column())
-            if special_background is not None:
-                return special_background
-            return self._row_background_color(index.row())
+            return self._cell_background_color(index.row(), index.column())
 
         if role == Qt.ForegroundRole:
-            special_foreground = self._special_count_cell_foreground(index.row(), index.column())
-            if special_foreground is not None:
-                return special_foreground
-            return self._row_foreground_color(index.row())
+            return self._cell_foreground_color(index.row(), index.column())
 
         return None
 
@@ -242,6 +240,7 @@ class CutTableModel(QAbstractTableModel):
         return len(self._rows)
 
     def refresh_colors(self) -> None:
+        self._clear_color_cache()
         if not self._rows:
             return
         top_left = self.index(0, 0)
@@ -287,6 +286,7 @@ class CutTableModel(QAbstractTableModel):
     def _replace_rows_internal(self, rows: list[list[str]], changed_columns: list[int] | None = None) -> None:
         self.beginResetModel()
         self._rows = [self._normalize_row(row) for row in rows]
+        self._clear_color_cache()
         self.endResetModel()
         self.actualRowCountChanged.emit(len(self._rows))
         if changed_columns:
@@ -330,6 +330,7 @@ class CutTableModel(QAbstractTableModel):
             changed_columns.add(change.column)
             if change.column in (COLUMN_STATUS, COLUMN_TP_LOAD_COUNT, COLUMN_BG_LOAD_COUNT):
                 rows_requiring_full_repaint.add(change.row)
+                self._clear_row_color_cache(change.row)
 
         if not changed_cells:
             return
@@ -398,6 +399,46 @@ class CutTableModel(QAbstractTableModel):
             cls._sort_key(row[COLUMN_CUT_NUMBER]),
             cls._sort_key(row[COLUMN_AB_GROUP]),
         )
+
+    def _cell_background_color(self, row: int, column: int) -> QColor | None:
+        special_background = self._cached_special_count_cell_background(row, column)
+        if special_background is not None:
+            return special_background
+        if row not in self._row_background_cache:
+            self._row_background_cache[row] = self._row_background_color(row)
+        return self._row_background_cache[row]
+
+    def _cell_foreground_color(self, row: int, column: int) -> QColor | None:
+        special_foreground = self._cached_special_count_cell_foreground(row, column)
+        if special_foreground is not None:
+            return special_foreground
+        if row not in self._row_foreground_cache:
+            self._row_foreground_cache[row] = self._row_foreground_color(row)
+        return self._row_foreground_cache[row]
+
+    def _clear_color_cache(self) -> None:
+        self._row_background_cache.clear()
+        self._row_foreground_cache.clear()
+        self._special_background_cache.clear()
+        self._special_foreground_cache.clear()
+
+    def _clear_row_color_cache(self, row: int) -> None:
+        self._row_background_cache.pop(row, None)
+        self._row_foreground_cache.pop(row, None)
+        self._special_background_cache = {key: value for key, value in self._special_background_cache.items() if key[0] != row}
+        self._special_foreground_cache = {key: value for key, value in self._special_foreground_cache.items() if key[0] != row}
+
+    def _cached_special_count_cell_background(self, row: int, column: int) -> QColor | None:
+        key = (row, column)
+        if key not in self._special_background_cache:
+            self._special_background_cache[key] = self._special_count_cell_background(row, column)
+        return self._special_background_cache[key]
+
+    def _cached_special_count_cell_foreground(self, row: int, column: int) -> QColor | None:
+        key = (row, column)
+        if key not in self._special_foreground_cache:
+            self._special_foreground_cache[key] = self._special_count_cell_foreground(row, column)
+        return self._special_foreground_cache[key]
 
     def _row_background_color(self, row: int) -> QColor | None:
         palette = QApplication.palette()

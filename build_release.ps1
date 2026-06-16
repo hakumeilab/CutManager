@@ -10,7 +10,7 @@ $specTemplatePath = Join-Path $repoRoot "pysidedeploy.spec"
 $pythonExe = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $deployExe = Join-Path $repoRoot ".venv\Scripts\pyside6-deploy.exe"
 $distDir = Join-Path $repoRoot "dist"
-$defaultIconPath = Join-Path $repoRoot ".venv\Lib\site-packages\PySide6\scripts\deploy_lib\pyside_icon.ico"
+$defaultIconPath = Join-Path $repoRoot "assets\cutmanager_icon.ico"
 
 $versionMatch = Select-String -Path $versionFile -Pattern '__version__ = "(?<version>[^"]+)"'
 if (-not $versionMatch) {

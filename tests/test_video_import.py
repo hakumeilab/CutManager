@@ -9,7 +9,7 @@ from cutmanager.video_import import apply_videos_to_rows
 
 class VideoImportTests(unittest.TestCase):
     def test_unmatched_count_is_tracked_per_file(self) -> None:
-        rows = [["001", "", "", "", "", "", "", ""]]
+        rows = [["001", "", "", "", "", "", "", "", "", "", ""]]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

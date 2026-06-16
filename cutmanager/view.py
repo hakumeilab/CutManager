@@ -2,21 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, QModelIndex, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemDelegate,
     QAbstractItemView,
+    QCalendarWidget,
     QComboBox,
     QDateEdit,
     QHeaderView,
     QLineEdit,
+    QMenu,
     QStyledItemDelegate,
     QStyle,
     QStyleOptionButton,
     QTableView,
     QWidget,
+    QWidgetAction,
 )
 
 from .constants import (
@@ -73,6 +76,7 @@ class CalendarEditor(QDateEdit):
         self.setCalendarPopup(True)
         self.setDisplayFormat("yyyy/MM/dd")
         self.setAutoFillBackground(True)
+        self._calendar_menu: QMenu | None = None
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -80,6 +84,33 @@ class CalendarEditor(QDateEdit):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def open_calendar_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setObjectName("calendarMenu")
+        calendar = QCalendarWidget(menu)
+        calendar.setObjectName("calendarPopup")
+        calendar.setSelectedDate(self.date())
+        calendar.setGridVisible(True)
+        calendar.clicked.connect(lambda date, menu=menu: self._select_calendar_date(date, menu))
+        calendar.activated.connect(lambda date, menu=menu: self._select_calendar_date(date, menu))
+        menu.setStyleSheet(
+            "QMenu#calendarMenu { border: 1px solid #94a3b8; border-radius: 6px; padding: 6px; }"
+            "QCalendarWidget QWidget { alternate-background-color: #f8fbff; }"
+            "QCalendarWidget QToolButton { border: 0px; border-radius: 4px; padding: 4px 8px; font-weight: 600; }"
+            "QCalendarWidget QToolButton:hover { background: #dbeafe; }"
+            "QCalendarWidget QAbstractItemView { border: 0px; selection-background-color: #2563eb; selection-color: #eff6ff; }"
+        )
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(calendar)
+        menu.addAction(action)
+        self._calendar_menu = menu
+        menu.popup(self.mapToGlobal(QPoint(0, self.height())))
+
+    def _select_calendar_date(self, date: QDate, menu: QMenu) -> None:
+        self.setDate(date)
+        menu.close()
+        self.confirmRequested.emit()
 
 
 class CutItemDelegate(QStyledItemDelegate):
@@ -98,7 +129,7 @@ class CutItemDelegate(QStyledItemDelegate):
         elif self._is_date_column(index.column()):
             editor = CalendarEditor(parent)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
-            QTimer.singleShot(0, editor.calendarWidget().show)
+            QTimer.singleShot(0, editor.open_calendar_menu)
         else:
             editor = CellEditorLineEdit(parent)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
@@ -159,13 +190,29 @@ class CutItemDelegate(QStyledItemDelegate):
         option_copy.state &= ~QStyle.StateFlag.State_Selected
         option_copy.state &= ~QStyle.StateFlag.State_HasFocus
 
-        if self._is_candidate_column(index.column()) and self._is_editing_index(index):
+        if self._is_icon_column(index.column()) and self._is_editing_index(index):
             option_copy.text = ""
-        elif self._is_candidate_column(index.column()):
+        elif self._is_icon_column(index.column()):
             option_copy.rect = option_copy.rect.adjusted(0, 0, -18, 0)
         super().paint(painter, option_copy, index)
         if self._is_candidate_column(index.column()) and not self._is_editing_index(index):
             self._paint_candidate_indicator(painter, indicator_option)
+        elif self._is_date_column(index.column()) and not self._is_editing_index(index):
+            self._paint_calendar_indicator(painter, indicator_option)
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._is_icon_column(index.column())
+            and self._indicator_rect(option.rect).contains(event.pos())
+        ):
+            view = self.parent()
+            index_copy = QModelIndex(index)
+            if hasattr(view, "edit"):
+                QTimer.singleShot(0, lambda view=view, index_copy=index_copy: view.edit(index_copy))
+                return True
+        return super().editorEvent(event, model, option, index)
 
     def current_editor(self) -> QWidget | None:
         return self._active_editor
@@ -211,6 +258,10 @@ class CutItemDelegate(QStyledItemDelegate):
     def _is_date_column(column: int) -> bool:
         return column in (COLUMN_TP_DATE, COLUMN_BG_DATE, COLUMN_DELIVERY_DATE)
 
+    @classmethod
+    def _is_icon_column(cls, column: int) -> bool:
+        return cls._is_candidate_column(column) or cls._is_date_column(column)
+
     @staticmethod
     def _paint_candidate_indicator(painter, option) -> None:
         rect = option.rect
@@ -219,7 +270,7 @@ class CutItemDelegate(QStyledItemDelegate):
 
         palette = option.palette
         icon_color = palette.color(QPalette.ColorRole.Mid)
-        center = QPoint(rect.right() - 9, rect.center().y())
+        center = CutItemDelegate._indicator_rect(rect).center()
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -231,6 +282,36 @@ class CutItemDelegate(QStyledItemDelegate):
         painter.drawLine(center + QPoint(-3, -2), center + QPoint(0, 1))
         painter.drawLine(center + QPoint(0, 1), center + QPoint(3, -2))
         painter.restore()
+
+    @staticmethod
+    def _paint_calendar_indicator(painter, option) -> None:
+        rect = option.rect
+        if rect.width() < 18 or rect.height() < 14:
+            return
+
+        icon_rect = CutItemDelegate._indicator_rect(rect).adjusted(2, 2, -2, -2)
+        icon_color = option.palette.color(QPalette.ColorRole.Mid)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(icon_color)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(icon_rect.adjusted(0, 2, -1, -1), 2, 2)
+        painter.drawLine(icon_rect.left(), icon_rect.top() + 5, icon_rect.right() - 1, icon_rect.top() + 5)
+        painter.drawLine(icon_rect.left() + 3, icon_rect.top(), icon_rect.left() + 3, icon_rect.top() + 3)
+        painter.drawLine(icon_rect.right() - 4, icon_rect.top(), icon_rect.right() - 4, icon_rect.top() + 3)
+        painter.restore()
+
+    @staticmethod
+    def _indicator_rect(cell_rect: QRect) -> QRect:
+        return QRect(
+            cell_rect.right() - 17,
+            cell_rect.center().y() - 8,
+            16,
+            16,
+        )
 
     @staticmethod
     def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:

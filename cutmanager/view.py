@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QModelIndex, QPoint, QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtCore import QDate, QEvent, QModelIndex, QPoint, QRect, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemDelegate,
@@ -17,6 +27,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QStyleOptionButton,
+    QStyleOptionViewItem,
     QTableView,
     QWidget,
     QWidgetAction,
@@ -28,8 +39,10 @@ from .constants import (
     COLUMN_BG_LOAD_COUNT,
     COLUMN_DELIVERY_DATE,
     COLUMN_STATUS,
+    COLUMN_THUMBNAIL,
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
+    COLUMN_VIDEO_PATH,
     STATUS_OPTIONS,
     TP_LOAD_COUNT_OPTIONS,
 )
@@ -92,6 +105,12 @@ class CalendarEditor(QDateEdit):
         calendar.setObjectName("calendarPopup")
         calendar.setSelectedDate(self.date())
         calendar.setGridVisible(True)
+        # ポップアップ内で日セルが潰れ、2 桁の日付が見切れないよう十分な領域を確保する。
+        calendar.setMinimumSize(300, 260)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        date_view = calendar.findChild(QAbstractItemView)
+        if date_view is not None:
+            date_view.setMinimumSize(300, 210)
         calendar.clicked.connect(lambda date, menu=menu: self._select_calendar_date(date, menu))
         calendar.activated.connect(lambda date, menu=menu: self._select_calendar_date(date, menu))
         menu.setStyleSheet(
@@ -117,6 +136,39 @@ class CutItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._active_editor: QWidget | None = None
+        # 縮小済みサムネイルのキャッシュ（描画のたびの再スケールを避ける）。
+        self._scaled_thumbnail_cache: dict[tuple[int, int, int], QPixmap] = {}
+        # 生成中に表示するスケルトンのライトスイープ用アニメーション。
+        self._skeleton_phase = 0.0
+        self._skeleton_timer = QTimer(self)
+        self._skeleton_timer.setInterval(33)  # 約 30fps
+        self._skeleton_timer.timeout.connect(self._advance_skeleton)
+
+    def set_skeleton_animating(self, active: bool) -> None:
+        if active:
+            if not self._skeleton_timer.isActive():
+                self._skeleton_timer.start()
+        else:
+            if self._skeleton_timer.isActive():
+                self._skeleton_timer.stop()
+            self._update_thumbnail_column()
+
+    def _advance_skeleton(self) -> None:
+        self._skeleton_phase = (self._skeleton_phase + 0.06) % 1.0
+        self._update_thumbnail_column()
+
+    def _update_thumbnail_column(self) -> None:
+        # サムネイル列だけを再描画してアニメーション負荷を抑える。
+        view = self.parent()
+        if not isinstance(view, QTableView):
+            return
+        header = view.horizontalHeader()
+        if header is None or view.isColumnHidden(COLUMN_THUMBNAIL):
+            return
+        x = header.sectionViewportPosition(COLUMN_THUMBNAIL)
+        width = header.sectionSize(COLUMN_THUMBNAIL)
+        viewport = view.viewport()
+        viewport.update(x, 0, width, viewport.height())
 
     def createEditor(self, parent, option, index):
         if self._candidate_options(index.column()) is not None:
@@ -168,6 +220,10 @@ class CutItemDelegate(QStyledItemDelegate):
         super().setModelData(editor, model, index)
 
     def paint(self, painter, option, index) -> None:
+        if index.column() == COLUMN_THUMBNAIL:
+            self._paint_thumbnail(painter, option, index)
+            return
+
         option_copy = type(option)(option)
         self.initStyleOption(option_copy, index)
         indicator_option = type(option_copy)(option_copy)
@@ -199,6 +255,92 @@ class CutItemDelegate(QStyledItemDelegate):
             self._paint_candidate_indicator(painter, indicator_option)
         elif self._is_date_column(index.column()) and not self._is_editing_index(index):
             self._paint_calendar_indicator(painter, indicator_option)
+
+    def sizeHint(self, option, index) -> QSize:
+        # 元サムネイルが大きくても行高/列幅の推定を膨らませない（セル内に収める描画のため）。
+        if index.column() == COLUMN_THUMBNAIL:
+            return QSize(48, 24)
+        return super().sizeHint(option, index)
+
+    def _paint_thumbnail(self, painter, option, index) -> None:
+        opt = type(option)(option)
+        self.initStyleOption(opt, index)
+        # 背景・選択は標準スタイルで描画し、テキスト/アイコンは自前で扱う。
+        opt.text = ""
+        opt.icon = QIcon()
+        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDecoration
+
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        margin = 2
+        target = opt.rect.adjusted(margin, margin, -margin, -margin)
+        if target.width() <= 0 or target.height() <= 0:
+            return
+
+        pixmap = index.data(Qt.ItemDataRole.DecorationRole)
+        if not isinstance(pixmap, QPixmap) or pixmap.isNull():
+            # サムネイル生成待ちの行はスケルトン＋ライトスイープを表示する。
+            video_path = str(
+                index.siblingAtColumn(COLUMN_VIDEO_PATH).data(Qt.ItemDataRole.DisplayRole) or ""
+            )
+            if video_path.strip():
+                self._paint_skeleton(painter, target, opt.palette)
+            return
+
+        scaled = self._scaled_thumbnail(pixmap, target.width(), target.height())
+        x = target.x() + (target.width() - scaled.width()) // 2
+        y = target.y() + (target.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+
+    def _paint_skeleton(self, painter, rect, palette) -> None:
+        radius = 3
+        base_color = palette.color(QPalette.ColorRole.Base)
+        dark = (0.299 * base_color.red() + 0.587 * base_color.green() + 0.114 * base_color.blue()) < 128
+        if dark:
+            fill = QColor("#243044")
+            sweep = QColor(255, 255, 255, 45)
+        else:
+            fill = QColor("#e2e8f0")
+            sweep = QColor(255, 255, 255, 200)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect.x(), rect.y(), rect.width(), rect.height(), radius, radius)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillPath(path, fill)
+
+        # 左から右へ移動する光の帯。
+        band = max(12, rect.width() // 3)
+        travel = rect.width() + band
+        center = rect.x() - band / 2 + self._skeleton_phase * travel
+        gradient = QLinearGradient(center - band / 2, 0, center + band / 2, 0)
+        transparent = QColor(sweep)
+        transparent.setAlpha(0)
+        gradient.setColorAt(0.0, transparent)
+        gradient.setColorAt(0.5, sweep)
+        gradient.setColorAt(1.0, transparent)
+        painter.setClipPath(path)
+        painter.fillRect(rect, gradient)
+        painter.restore()
+
+    def _scaled_thumbnail(self, pixmap: QPixmap, width: int, height: int) -> QPixmap:
+        key = (pixmap.cacheKey(), width, height)
+        cached = self._scaled_thumbnail_cache.get(key)
+        if cached is not None:
+            return cached
+        scaled = pixmap.scaled(
+            QSize(width, height),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        # キャッシュの肥大化を防ぐ（列/行サイズやサムネ更新の組み合わせ上限）。
+        if len(self._scaled_thumbnail_cache) > 256:
+            self._scaled_thumbnail_cache.clear()
+        self._scaled_thumbnail_cache[key] = scaled
+        return scaled
 
     def editorEvent(self, event, model, option, index) -> bool:
         if (

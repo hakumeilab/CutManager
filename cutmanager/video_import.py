@@ -8,13 +8,22 @@ from .constants import (
     COLUMN_AB_GROUP,
     COLUMN_CUT_NUMBER,
     COLUMN_DELIVERY_DATE,
+    COLUMN_ROLL,
     COLUMN_STATUS,
     COLUMN_TAKE,
     COLUMN_TAKE_NUMBER,
+    COLUMN_VIDEO_PATH,
     CSV_HEADERS,
     VIDEO_FILE_EXTENSIONS,
 )
-from .folder_import import CUT_IDENTIFIER_PATTERN, CutIdentifier, extract_cut_identifiers, make_cut_key
+from .folder_import import (
+    CUT_IDENTIFIER_PATTERN,
+    CutIdentifier,
+    extract_cut_identifiers,
+    extract_delivery_date,
+    extract_roll,
+    make_cut_key,
+)
 
 
 EXPLICIT_TAKE_PATTERN = re.compile(r"(?i)(?:^|[_\-\s])(take|tk|t)[_\-\s]*([0-9]{1,3})(?=$|[_\-\s])")
@@ -28,6 +37,9 @@ class VideoMetadata:
     compatible_label: str
     take_label: str
     take_number: str
+    roll: str
+    video_path: str
+    folder_delivery_date: str
 
 
 @dataclass(slots=True)
@@ -81,7 +93,11 @@ def apply_videos_to_rows(
                 row[COLUMN_STATUS] = metadata.compatible_label
             row[COLUMN_TAKE] = metadata.take_label
             row[COLUMN_TAKE_NUMBER] = metadata.take_number
-            row[COLUMN_DELIVERY_DATE] = delivery_date
+            row[COLUMN_DELIVERY_DATE] = metadata.folder_delivery_date or delivery_date
+            if metadata.roll:
+                row[COLUMN_ROLL] = metadata.roll
+            if metadata.video_path:
+                row[COLUMN_VIDEO_PATH] = metadata.video_path
             updated_count += 1
         if file_unmatched:
             unmatched_count += 1
@@ -141,11 +157,22 @@ def extract_video_metadata(video_path: str | Path) -> VideoMetadata | None:
         return None
 
     take_label, take_number = _extract_take_info(stem, cut_identifiers)
+    parent_name = path.parent.name
+    # Roll と納品日は親フォルダー名を優先し、無ければファイル名から補う。
+    roll = extract_roll(parent_name) or extract_roll(stem)
+    folder_delivery_date = extract_delivery_date(parent_name) or extract_delivery_date(stem)
+    try:
+        resolved_path = str(path.resolve(strict=False))
+    except OSError:
+        resolved_path = str(path)
     return VideoMetadata(
         cut_identifiers=cut_identifiers,
         compatible_label="兼用" if len(cut_identifiers) > 1 else "",
         take_label=take_label,
         take_number=take_number,
+        roll=roll,
+        video_path=resolved_path,
+        folder_delivery_date=folder_delivery_date,
     )
 
 
@@ -200,7 +227,9 @@ def _build_video_row(cut_identifier: CutIdentifier, metadata: VideoMetadata, del
     row[COLUMN_STATUS] = metadata.compatible_label
     row[COLUMN_TAKE] = metadata.take_label
     row[COLUMN_TAKE_NUMBER] = metadata.take_number
-    row[COLUMN_DELIVERY_DATE] = delivery_date
+    row[COLUMN_DELIVERY_DATE] = metadata.folder_delivery_date or delivery_date
+    row[COLUMN_ROLL] = metadata.roll
+    row[COLUMN_VIDEO_PATH] = metadata.video_path
     return row
 
 

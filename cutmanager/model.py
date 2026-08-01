@@ -13,10 +13,17 @@ from .constants import (
     COLUMN_BG_LOAD_COUNT,
     COLUMN_CUT_NUMBER,
     COLUMN_STATUS,
+    COLUMN_THUMBNAIL,
     COLUMN_TP_LOAD_COUNT,
+    COLUMN_VIDEO_PATH,
     CSV_HEADERS,
     STATUS_OPTIONS,
 )
+
+# ユーザーが直接編集できない列（プログラムが管理する）。
+READONLY_COLUMNS = frozenset({COLUMN_VIDEO_PATH, COLUMN_THUMBNAIL})
+# コピー/貼り付け/クリア/一括入力の対象外にする列。
+NON_DATA_COLUMNS = frozenset({COLUMN_THUMBNAIL})
 from .folder_import import make_cut_key
 from .history import HistoryCommand, HistoryManager
 
@@ -81,9 +88,15 @@ class CutTableModel(QAbstractTableModel):
         self._row_foreground_cache: dict[int, QColor | None] = {}
         self._special_background_cache: dict[tuple[int, int], QColor | None] = {}
         self._special_foreground_cache: dict[tuple[int, int], QColor | None] = {}
+        self._thumbnail_provider = None
+        # 動画パス（casefold）→ 行番号リストの索引。サムネイル更新照合を O(1) にする。
+        self._video_path_rows: dict[str, list[int]] | None = None
 
     def set_history_manager(self, history: HistoryManager | None) -> None:
         self._history = history
+
+    def set_thumbnail_provider(self, provider) -> None:
+        self._thumbnail_provider = provider
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
@@ -102,6 +115,12 @@ class CutTableModel(QAbstractTableModel):
         if self._is_virtual_row(index.row()):
             return "" if role in (Qt.DisplayRole, Qt.EditRole) else None
 
+        if index.column() == COLUMN_THUMBNAIL:
+            if role == Qt.DecorationRole:
+                return self._thumbnail_for_row(index.row())
+            if role in (Qt.DisplayRole, Qt.EditRole):
+                return ""
+
         if role in (Qt.DisplayRole, Qt.EditRole):
             return self._rows[index.row()][index.column()]
 
@@ -115,6 +134,9 @@ class CutTableModel(QAbstractTableModel):
 
     def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
         if role != Qt.EditRole or not index.isValid():
+            return False
+
+        if index.column() in READONLY_COLUMNS:
             return False
 
         text = "" if value is None else str(value)
@@ -137,7 +159,10 @@ class CutTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
             return Qt.NoItemFlags
-        return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
+        base_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if index.column() in READONLY_COLUMNS:
+            return base_flags
+        return base_flags | Qt.ItemIsEditable
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
         if orientation == Qt.Horizontal:
@@ -202,6 +227,8 @@ class CutTableModel(QAbstractTableModel):
             if key in seen:
                 continue
             seen.add(key)
+            if index.column() in NON_DATA_COLUMNS:
+                continue
             if self._rows[index.row()][index.column()] == "":
                 continue
             changes.append((index.row(), index.column(), ""))
@@ -287,6 +314,7 @@ class CutTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._rows = [self._normalize_row(row) for row in rows]
         self._clear_color_cache()
+        self._video_path_rows = None
         self.endResetModel()
         self.actualRowCountChanged.emit(len(self._rows))
         if changed_columns:
@@ -298,6 +326,8 @@ class CutTableModel(QAbstractTableModel):
 
         for row, column, value in changes:
             if not 0 <= column < len(CSV_HEADERS):
+                continue
+            if column in NON_DATA_COLUMNS:
                 continue
             if not 0 <= row < len(self._rows):
                 continue
@@ -335,6 +365,9 @@ class CutTableModel(QAbstractTableModel):
         if not changed_cells:
             return
 
+        if COLUMN_VIDEO_PATH in changed_columns:
+            self._video_path_rows = None
+
         for row, columns in changed_cells.items():
             if row in rows_requiring_full_repaint:
                 left_column = 0
@@ -351,6 +384,46 @@ class CutTableModel(QAbstractTableModel):
             )
 
         self.contentChanged.emit(sorted(changed_columns))
+
+    def _thumbnail_for_row(self, row: int):
+        if self._thumbnail_provider is None or not 0 <= row < len(self._rows):
+            return None
+        video_path = self._rows[row][COLUMN_VIDEO_PATH].strip()
+        if not video_path:
+            return None
+        return self._thumbnail_provider.thumbnail(video_path)
+
+    def video_path_for_row(self, row: int) -> str:
+        if not 0 <= row < len(self._rows):
+            return ""
+        return self._rows[row][COLUMN_VIDEO_PATH].strip()
+
+    def refresh_thumbnails_for_path(self, video_path: str) -> None:
+        """指定パスに一致するサムネイルセルの再描画を促す。
+
+        provider が渡すパスも行に保持されたパスも import 時点で解決済みの絶対パスの
+        ため resolve() はせず、事前構築した索引で O(1) に該当行を引く。
+        """
+        target = str(video_path or "").strip().casefold()
+        if not target:
+            return
+        rows = self._video_path_row_map().get(target)
+        if not rows:
+            return
+        for row in rows:
+            if 0 <= row < len(self._rows):
+                cell = self.index(row, COLUMN_THUMBNAIL)
+                self.dataChanged.emit(cell, cell, [Qt.DecorationRole])
+
+    def _video_path_row_map(self) -> dict[str, list[int]]:
+        if self._video_path_rows is None:
+            mapping: dict[str, list[int]] = {}
+            for row, row_values in enumerate(self._rows):
+                current = row_values[COLUMN_VIDEO_PATH].strip()
+                if current:
+                    mapping.setdefault(current.casefold(), []).append(row)
+            self._video_path_rows = mapping
+        return self._video_path_rows
 
     def _is_virtual_row(self, row: int) -> bool:
         return row >= len(self._rows)

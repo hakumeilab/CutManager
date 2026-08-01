@@ -12,6 +12,9 @@ CSV_HEADERS = [
     "テイク",
     "テイク番号",
     "納品日",
+    "Roll",
+    "動画パス",
+    "サムネイル",
 ]
 
 COLUMN_CUT_NUMBER = 0
@@ -25,6 +28,9 @@ COLUMN_BG_DATE = 7
 COLUMN_TAKE = 8
 COLUMN_TAKE_NUMBER = 9
 COLUMN_DELIVERY_DATE = 10
+COLUMN_ROLL = 11
+COLUMN_VIDEO_PATH = 12
+COLUMN_THUMBNAIL = 13
 
 COLUMN_MATERIAL_LOAD_COUNT = COLUMN_TP_LOAD_COUNT
 COLUMN_MATERIAL_DATE = COLUMN_TP_DATE
@@ -42,7 +48,15 @@ STATUS_ROW_FOREGROUND_HEX = {
     "欠番": "#f8fafc",
 }
 
-CSV_FILE_FILTER = "CSV Files (*.csv)"
+# 独自拡張子 .cutmgr（中身はCSV）。保存時の既定拡張子として使い、
+# 開く/D&D では .cutmgr と .csv の両方を受け付ける。
+PROJECT_FILE_EXTENSION = ".cutmgr"
+SUPPORTED_PROJECT_EXTENSIONS = (".cutmgr", ".csv")
+CSV_FILE_FILTER = (
+    "CutManager ファイル (*.cutmgr *.csv);;"
+    "CutManager プロジェクト (*.cutmgr);;"
+    "CSV ファイル (*.csv)"
+)
 WINDOW_TITLE = "CutManager"
 WINDOW_SIZE = (1220, 720)
 IMPORT_DATE_FORMAT = "yyyy/MM/dd"

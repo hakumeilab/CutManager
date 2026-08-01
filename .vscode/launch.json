@@ -2,11 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "CutManager",
-      "type": "python",
+      "name": "CutManager: デバッグ",
+      "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
-      "console": "integratedTerminal"
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONFAULTHANDLER": "1"
+      }
     }
-  ]
+  ],
+  "compounds": []
 }

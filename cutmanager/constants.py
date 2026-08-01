@@ -57,6 +57,8 @@ CSV_FILE_FILTER = (
     "CutManager プロジェクト (*.cutmgr);;"
     "CSV ファイル (*.csv)"
 )
+# 保存ダイアログで既定選択にするフィルター。既定拡張子を .cutmgr に固定する。
+PROJECT_SAVE_FILTER = "CutManager プロジェクト (*.cutmgr)"
 WINDOW_TITLE = "CutManager"
 WINDOW_SIZE = (1220, 720)
 IMPORT_DATE_FORMAT = "yyyy/MM/dd"

@@ -63,6 +63,7 @@ from .constants import (
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
     PROJECT_FILE_EXTENSION,
+    PROJECT_SAVE_FILTER,
     SUPPORTED_PROJECT_EXTENSIONS,
     VIDEO_FILE_EXTENSIONS,
     WINDOW_SIZE,
@@ -2005,7 +2006,14 @@ class MainWindow(QMainWindow):
         else:
             start_path = str(Path.cwd() / f"cut_list{PROJECT_FILE_EXTENSION}")
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "保存先を選択", start_path, CSV_FILE_FILTER)
+        # 既定選択フィルターを .cutmgr 専用にし、拡張子未指定時の既定を .cutmgr に固定する。
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存先を選択",
+            start_path,
+            CSV_FILE_FILTER,
+            PROJECT_SAVE_FILTER,
+        )
         if not file_path:
             return None
 

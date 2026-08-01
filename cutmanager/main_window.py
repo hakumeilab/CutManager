@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -52,12 +55,16 @@ from .constants import (
     COLUMN_BG_LOAD_COUNT,
     COLUMN_CUT_NUMBER,
     COLUMN_DELIVERY_DATE,
+    COLUMN_THUMBNAIL,
+    COLUMN_VIDEO_PATH,
     CSV_FILE_FILTER,
     CSV_HEADERS,
     IMPORT_DATE_FORMAT,
     COLUMN_STATUS,
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
+    PROJECT_FILE_EXTENSION,
+    SUPPORTED_PROJECT_EXTENSIONS,
     VIDEO_FILE_EXTENSIONS,
     WINDOW_SIZE,
     WINDOW_TITLE,
@@ -66,8 +73,9 @@ from .csv_io import CsvLoadError, load_csv_file, save_csv_file
 from .filter_popup import ColumnFilterPopup
 from .folder_import import apply_material_updates, build_rows_from_dropped_folders
 from .history import HistoryManager
-from .model import CutTableModel
+from .model import CutTableModel, NON_DATA_COLUMNS
 from .proxy import CutFilterProxyModel
+from .thumbnails import ThumbnailProvider
 from .settings_dialog import SettingsDialog
 from .update_manager import (
     RELEASES_PAGE_URL,
@@ -222,6 +230,7 @@ class MainWindow(QMainWindow):
     UNDO_LIMIT_KEY = "undoLimit"
     EPISODE_MEMO_PREFIX = "episodeMemo/"
     HEADER_STATE_KEY = "tableHeaderState"
+    COLUMN_VISIBILITY_KEY = "hiddenColumns"
     DEFAULT_UNDO_LIMIT = 100
 
     def __init__(self) -> None:
@@ -234,17 +243,23 @@ class MainWindow(QMainWindow):
         self._pending_resort = False
         self._skip_close_confirmation = False
         self._drag_feedback_active = False
+        self._drag_accept_cache: bool | None = None
         self._theme_apply_pending = False
         self._applying_theme_styles = False
         self._last_window_stylesheet = ""
         self._last_table_stylesheet = ""
         self._restoring_header_state = False
+        self._syncing_section_size = False
         self.settings = QSettings("CutManager", "CutManager")
         self.recent_files = self._load_recent_files()
 
         self.model = CutTableModel(parent=self)
         self.history = HistoryManager(self._load_undo_limit(), self)
         self.model.set_history_manager(self.history)
+        self.thumbnail_provider = ThumbnailProvider(self)
+        self.model.set_thumbnail_provider(self.thumbnail_provider)
+        self.thumbnail_provider.thumbnailReady.connect(self.model.refresh_thumbnails_for_path)
+        self.thumbnail_provider.progressChanged.connect(self._on_thumbnail_progress)
         self.proxy_model = CutFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
 
@@ -261,10 +276,14 @@ class MainWindow(QMainWindow):
         self.summary_memo_edit: QPlainTextEdit | None = None
         self._updating_summary_memo = False
         self.drop_progress_bar = QProgressBar(self)
+        self.thumbnail_progress_bar = QProgressBar(self)
+        self.thumbnail_status_label = QLabel(self)
         self.file_menu = QMenu("ファイル", self)
         self.edit_menu = QMenu("編集", self)
         self.sort_menu = QMenu("並べ替え", self)
+        self.view_menu = QMenu("表示", self)
         self.help_menu = QMenu("ヘルプ", self)
+        self.column_visibility_actions: dict[int, QAction] = {}
         self.recent_files_menu = QMenu("最近開いたファイル", self)
         self._update_check_thread: QThread | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
@@ -285,9 +304,11 @@ class MainWindow(QMainWindow):
         self.add_row_below_action: QAction
         self.delete_row_action: QAction
         self.clear_values_action: QAction
+        self.regenerate_thumbnails_action: QAction
         self.preferences_action: QAction
         self.restore_default_sort_action: QAction
         self.check_updates_action: QAction
+        self.license_info_action: QAction
 
         self.setAcceptDrops(True)
         self.resize(*WINDOW_SIZE)
@@ -351,6 +372,10 @@ class MainWindow(QMainWindow):
         self.clear_values_action = QAction("値を削除", self)
         self.clear_values_action.triggered.connect(self.clear_selected_cells)
 
+        self.regenerate_thumbnails_action = QAction("サムネイル再生成", self)
+        self.regenerate_thumbnails_action.setToolTip("すべての動画パスのサムネイルを作り直します。")
+        self.regenerate_thumbnails_action.triggered.connect(self.regenerate_thumbnails)
+
         self.preferences_action = QAction("環境設定", self)
         self.preferences_action.triggered.connect(self.open_settings_dialog)
 
@@ -360,6 +385,9 @@ class MainWindow(QMainWindow):
 
         self.check_updates_action = QAction("更新を確認", self)
         self.check_updates_action.triggered.connect(self.check_for_updates)
+
+        self.license_info_action = QAction("ライセンス情報", self)
+        self.license_info_action.triggered.connect(self.show_license_info)
 
         for action in (
             self.new_action,
@@ -375,9 +403,11 @@ class MainWindow(QMainWindow):
             self.add_row_below_action,
             self.delete_row_action,
             self.clear_values_action,
+            self.regenerate_thumbnails_action,
             self.preferences_action,
             self.restore_default_sort_action,
             self.check_updates_action,
+            self.license_info_action,
         ):
             self.addAction(action)
 
@@ -389,10 +419,11 @@ class MainWindow(QMainWindow):
 
         self.drop_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_hint_label.setVisible(False)
-        self.drop_hint_label.setText("ここに CSV / 素材フォルダー / PSD / 動画ファイルをドロップ")
+        self.drop_hint_label.setText("ここに CSV / 素材フォルダー / PSD / 動画ファイル・Roll フォルダーをドロップ")
 
         self.table_view.setModel(self.proxy_model)
-        self.table_view.setItemDelegate(CutItemDelegate(self.table_view))
+        self.cut_delegate = CutItemDelegate(self.table_view)
+        self.table_view.setItemDelegate(self.cut_delegate)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -417,10 +448,11 @@ class MainWindow(QMainWindow):
         header.sectionMoved.connect(self._save_header_state)
         self._apply_theme_styles()
 
-        default_widths = [120, 180, 90, 110, 105, 115, 105, 115, 90, 105, 115]
+        default_widths = [120, 180, 90, 110, 105, 115, 105, 115, 90, 105, 115, 80, 240, 110]
         for column, width in enumerate(default_widths):
             self.table_view.setColumnWidth(column, width)
         self._restore_header_state()
+        self._apply_column_visibility()
 
         self._set_drag_feedback(False)
 
@@ -440,6 +472,13 @@ class MainWindow(QMainWindow):
         self.drop_progress_bar.setTextVisible(False)
         self.drop_progress_bar.setVisible(False)
         self.drop_progress_bar.setFixedWidth(160)
+
+        self.thumbnail_progress_bar.setTextVisible(False)
+        self.thumbnail_progress_bar.setVisible(False)
+        self.thumbnail_progress_bar.setFixedWidth(140)
+        self.thumbnail_status_label.setObjectName("statusMeta")
+        self.thumbnail_status_label.setVisible(False)
+
         self.file_path_label.setObjectName("statusMeta")
         self.row_count_label.setObjectName("statusMeta")
         self.modified_label.setObjectName("statusMeta")
@@ -451,6 +490,8 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self.modified_label)
         status_bar.addPermanentWidget(self.drop_progress_bar)
         status_bar.addPermanentWidget(self.drop_result_label, 2)
+        status_bar.addPermanentWidget(self.thumbnail_status_label)
+        status_bar.addPermanentWidget(self.thumbnail_progress_bar)
         self.setStatusBar(status_bar)
 
     def _build_menu_bar(self) -> None:
@@ -476,20 +517,47 @@ class MainWindow(QMainWindow):
         self.edit_menu.addAction(self.add_row_action)
         self.edit_menu.addAction(self.delete_row_action)
         self.edit_menu.addSeparator()
+        self.edit_menu.addAction(self.regenerate_thumbnails_action)
         self.edit_menu.addAction(self.preferences_action)
 
         self.sort_menu.clear()
         self.sort_menu.addAction(self.restore_default_sort_action)
 
+        self._build_view_menu()
+
         self.help_menu.clear()
         self.help_menu.addAction(self.check_updates_action)
+        self.help_menu.addSeparator()
+        self.help_menu.addAction(self.license_info_action)
 
         self.menuBar().clear()
         self.menuBar().addMenu(self.file_menu)
         self.menuBar().addMenu(self.edit_menu)
         self.menuBar().addMenu(self.sort_menu)
+        self.menuBar().addMenu(self.view_menu)
         self.menuBar().addMenu(self.help_menu)
         self._refresh_recent_files_menu()
+
+    def _build_view_menu(self) -> None:
+        self.view_menu.clear()
+        self.column_visibility_actions.clear()
+        hidden_columns = self._load_hidden_columns()
+        for column, header in enumerate(CSV_HEADERS):
+            action = QAction(header, self)
+            action.setCheckable(True)
+            # 初期チェック状態の設定で toggled が発火して設定を上書きしないようブロックする。
+            was_blocked = action.blockSignals(True)
+            action.setChecked(column not in hidden_columns)
+            action.blockSignals(was_blocked)
+            action.toggled.connect(
+                lambda checked, col=column: self._on_column_visibility_toggled(col, checked)
+            )
+            self.column_visibility_actions[column] = action
+            self.view_menu.addAction(action)
+        self.view_menu.addSeparator()
+        show_all_action = QAction("すべての列を表示", self)
+        show_all_action.triggered.connect(self._show_all_columns)
+        self.view_menu.addAction(show_all_action)
 
     def _connect_signals(self) -> None:
         self.table_view.clearRequested.connect(self.clear_selected_cells)
@@ -500,8 +568,11 @@ class MainWindow(QMainWindow):
         self.table_view.pathsDropped.connect(self.handle_dropped_paths)
         self.table_view.dragStateChanged.connect(self._set_drag_feedback)
         self.table_view.customContextMenuRequested.connect(self._open_table_context_menu)
+        self.table_view.doubleClicked.connect(self._on_cell_double_clicked)
         self.table_view.horizontalHeader().sectionClicked.connect(self._toggle_sort_by_column)
         self.table_view.horizontalHeader().filterButtonClicked.connect(self._open_column_popup)
+        self.table_view.horizontalHeader().sectionResized.connect(self._on_column_resized)
+        self.table_view.verticalHeader().sectionResized.connect(self._on_row_resized)
 
         self.model.modifiedChanged.connect(self._update_all_status)
         self.model.actualRowCountChanged.connect(self._update_all_status)
@@ -828,6 +899,9 @@ class MainWindow(QMainWindow):
             "テイク",
             "テイク番号",
             "納品日",
+            "Roll",
+            "動画パス",
+            "サムネイル",
         ]
         for target_visual_index, header_name in enumerate(default_order):
             try:
@@ -843,6 +917,102 @@ class MainWindow(QMainWindow):
         if self._restoring_header_state:
             return
         self.settings.setValue(self.HEADER_STATE_KEY, self.table_view.horizontalHeader().saveState())
+        self.settings.sync()
+
+    def _on_column_resized(self, logical_index: int, _old_size: int, new_size: int) -> None:
+        # リサイズした列が選択範囲に含まれていれば、選択中の全列を同じ幅に揃える。
+        if self._syncing_section_size:
+            return
+        selected_columns = self._selected_columns()
+        if logical_index not in selected_columns or len(selected_columns) <= 1:
+            return
+        header = self.table_view.horizontalHeader()
+        self._syncing_section_size = True
+        try:
+            for column in selected_columns:
+                if column != logical_index:
+                    header.resizeSection(column, new_size)
+        finally:
+            self._syncing_section_size = False
+        self._save_header_state()
+
+    def _on_row_resized(self, logical_index: int, _old_size: int, new_size: int) -> None:
+        # リサイズした行が選択範囲に含まれていれば、選択中の全行を同じ高さに揃える。
+        if self._syncing_section_size:
+            return
+        selected_rows = self._selected_rows()
+        if logical_index not in selected_rows or len(selected_rows) <= 1:
+            return
+        header = self.table_view.verticalHeader()
+        self._syncing_section_size = True
+        try:
+            for row in selected_rows:
+                if row != logical_index:
+                    header.resizeSection(row, new_size)
+        finally:
+            self._syncing_section_size = False
+
+    def _selected_columns(self) -> set[int]:
+        return {
+            index.column()
+            for index in self.table_view.selectionModel().selectedIndexes()
+            if index.isValid()
+        }
+
+    def _selected_rows(self) -> set[int]:
+        return {
+            index.row()
+            for index in self.table_view.selectionModel().selectedIndexes()
+            if index.isValid()
+        }
+
+    def _on_column_visibility_toggled(self, column: int, visible: bool) -> None:
+        self.table_view.setColumnHidden(column, not visible)
+        self._save_hidden_columns()
+
+    def _show_all_columns(self) -> None:
+        for column, action in self.column_visibility_actions.items():
+            if not action.isChecked():
+                action.setChecked(True)  # toggled シグナルで列表示と保存が走る
+            else:
+                self.table_view.setColumnHidden(column, False)
+        self._save_hidden_columns()
+
+    def _apply_column_visibility(self) -> None:
+        hidden_columns = self._load_hidden_columns()
+        for column in range(len(CSV_HEADERS)):
+            self.table_view.setColumnHidden(column, column in hidden_columns)
+            action = self.column_visibility_actions.get(column)
+            if action is not None:
+                was_blocked = action.blockSignals(True)
+                action.setChecked(column not in hidden_columns)
+                action.blockSignals(was_blocked)
+
+    def _load_hidden_columns(self) -> set[int]:
+        stored_value = self.settings.value(self.COLUMN_VISIBILITY_KEY, [])
+        if stored_value is None:
+            return set()
+        if isinstance(stored_value, str):
+            candidates = [stored_value]
+        else:
+            candidates = list(stored_value)
+        hidden: set[int] = set()
+        for candidate in candidates:
+            try:
+                column = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= column < len(CSV_HEADERS):
+                hidden.add(column)
+        return hidden
+
+    def _save_hidden_columns(self) -> None:
+        hidden = [
+            str(column)
+            for column in range(len(CSV_HEADERS))
+            if self.table_view.isColumnHidden(column)
+        ]
+        self.settings.setValue(self.COLUMN_VISIBILITY_KEY, hidden)
         self.settings.sync()
 
     def _schedule_resort(self, changed_columns: list[int]) -> None:
@@ -1020,6 +1190,84 @@ class MainWindow(QMainWindow):
         if cleared_count:
             self.statusBar().showMessage(f"{cleared_count} セルをクリアしました。", 3000)
 
+    def _on_cell_double_clicked(self, proxy_index) -> None:
+        if not proxy_index.isValid():
+            return
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return
+        column = source_index.column()
+        if column == COLUMN_VIDEO_PATH:
+            self._reveal_video_path(self.model.video_path_for_row(source_index.row()))
+        elif column == COLUMN_THUMBNAIL:
+            self._play_video(self.model.video_path_for_row(source_index.row()))
+
+    def regenerate_thumbnails(self) -> None:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for row in range(self.model.actual_row_count()):
+            path_text = self.model.video_path_for_row(row)
+            if not path_text:
+                continue
+            key = path_text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path_text)
+
+        if not paths:
+            self.statusBar().showMessage("再生成できる動画パスがありません。", 4000)
+            return
+
+        # 既存キャッシュ（メモリ状態）を破棄し、全件を強制再生成する（ffmpeg が上書き）。
+        self.thumbnail_provider.invalidate(paths)
+        for path_text in paths:
+            self.thumbnail_provider.request(path_text, force=True)
+        self.table_view.viewport().update()
+        self.statusBar().showMessage(f"サムネイルを再生成しています（{len(paths)} 件）。", 4000)
+
+    def _on_thumbnail_progress(self, done: int, total: int) -> None:
+        # 生成中はスケルトンのライトスイープを動かし、フリーズしていないことを示す。
+        self.cut_delegate.set_skeleton_animating(total > 0)
+        if total <= 0:
+            self.thumbnail_progress_bar.setVisible(False)
+            self.thumbnail_status_label.setVisible(False)
+            return
+        self.thumbnail_progress_bar.setRange(0, total)
+        self.thumbnail_progress_bar.setValue(done)
+        self.thumbnail_progress_bar.setVisible(True)
+        self.thumbnail_status_label.setText(f"サムネイル生成 {done}/{total}")
+        self.thumbnail_status_label.setVisible(True)
+
+    def _reveal_video_path(self, video_path: str) -> None:
+        path_text = str(video_path or "").strip()
+        if not path_text or not Path(path_text).exists():
+            self.statusBar().showMessage("動画ファイルが見つかりません。", 4000)
+            return
+        native_path = str(Path(path_text))
+        if sys.platform.startswith("win"):
+            # ファイルを選択した状態でエクスプローラーを開く。
+            subprocess.Popen(["explorer", f"/select,{native_path}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", native_path])
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(native_path).parent)))
+
+    def _play_video(self, video_path: str) -> None:
+        path_text = str(video_path or "").strip()
+        if not path_text or not Path(path_text).exists():
+            self.statusBar().showMessage("動画ファイルが見つかりません。", 4000)
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path_text)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path_text])
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path_text))
+        except OSError as exc:
+            self._show_error("動画を再生できませんでした。", str(exc))
+
     def undo(self) -> None:
         if self.history.undo():
             self._update_sort_indicator()
@@ -1094,6 +1342,8 @@ class MainWindow(QMainWindow):
                 target_column = start_column + column_offset
                 if target_column >= len(CSV_HEADERS):
                     break
+                if target_column in NON_DATA_COLUMNS:
+                    continue
                 text = "" if value is None else str(value)
                 if new_rows[target_row][target_column] == text:
                     continue
@@ -1372,6 +1622,83 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("更新を開始します。アプリを終了します。", 4000)
         QApplication.instance().quit()
 
+    def show_license_info(self) -> None:
+        notices = self._load_bundled_text("THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES.md")
+        ffmpeg_license_path = self._find_bundled_resource("ffmpeg-LICENSE.txt")
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("ライセンス情報")
+        message_box.setIcon(QMessageBox.Icon.Information)
+        message_box.setText(
+            "CutManager は MIT License で提供されています。\n"
+            "動画サムネイル生成に FFmpeg (GPLv3) を外部プログラムとして使用しています。"
+        )
+        message_box.setInformativeText(
+            "FFmpeg プロジェクト: https://ffmpeg.org/\n"
+            "対応ソース入手先: https://ffmpeg.org/download.html"
+        )
+        if notices:
+            message_box.setDetailedText(notices)
+
+        if ffmpeg_license_path is not None:
+            open_ffmpeg_license = message_box.addButton(
+                "FFmpeg ライセンス文を開く", QMessageBox.ButtonRole.ActionRole
+            )
+        else:
+            open_ffmpeg_license = None
+        open_source_button = message_box.addButton("FFmpeg ソース入手先を開く", QMessageBox.ButtonRole.ActionRole)
+        close_button = message_box.addButton("閉じる", QMessageBox.ButtonRole.AcceptRole)
+        message_box.setDefaultButton(close_button)
+        message_box.exec()
+
+        clicked = message_box.clickedButton()
+        if open_ffmpeg_license is not None and clicked == open_ffmpeg_license:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(ffmpeg_license_path)))
+        elif clicked == open_source_button:
+            QDesktopServices.openUrl(QUrl("https://ffmpeg.org/download.html"))
+
+    def _load_bundled_text(self, *names: str) -> str:
+        for name in names:
+            resource = self._find_bundled_resource(name)
+            if resource is not None:
+                try:
+                    return resource.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+        return ""
+
+    @staticmethod
+    def _find_bundled_resource(name: str) -> Path | None:
+        # 同梱データファイル（onefile 展開先 / 実行ファイル同ディレクトリ / リポジトリ）を探す。
+        search_dirs: list[Path] = []
+
+        def _add(path: Path | None) -> None:
+            if path is not None and path not in search_dirs:
+                search_dirs.append(path)
+
+        try:
+            _add(Path(__file__).resolve().parent.parent)
+        except Exception:
+            pass
+        try:
+            _add(Path(sys.executable).resolve().parent)
+        except Exception:
+            pass
+        if sys.argv and sys.argv[0]:
+            try:
+                _add(Path(sys.argv[0]).resolve().parent)
+            except Exception:
+                pass
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            _add(Path(meipass))
+
+        for directory in search_dirs:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+        return None
+
     @staticmethod
     def _open_release_page(url: str | None = None) -> None:
         target_url = QUrl(str(url or RELEASES_PAGE_URL))
@@ -1383,7 +1710,10 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if self._can_accept_paths(self._extract_drop_paths(event)):
+        # 受理可否の判定（ファイルシステム stat を含む）はドラッグ開始時に一度だけ行い、
+        # 移動中は結果を使い回す（ホバー中の重さを防ぐ）。
+        self._drag_accept_cache = self._can_accept_paths(self._extract_drop_paths(event))
+        if self._drag_accept_cache:
             self._set_drag_feedback(True)
             event.acceptProposedAction()
             return
@@ -1391,7 +1721,11 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if self._can_accept_paths(self._extract_drop_paths(event)):
+        accepted = self._drag_accept_cache
+        if accepted is None:
+            accepted = self._can_accept_paths(self._extract_drop_paths(event))
+            self._drag_accept_cache = accepted
+        if accepted:
             self._set_drag_feedback(True)
             event.acceptProposedAction()
             return
@@ -1399,10 +1733,12 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def dragLeaveEvent(self, event) -> None:
+        self._drag_accept_cache = None
         self._set_drag_feedback(False)
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
+        self._drag_accept_cache = None
         self._set_drag_feedback(False)
         if self.handle_dropped_paths(self._extract_drop_paths(event)):
             event.acceptProposedAction()
@@ -1419,7 +1755,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "ドロップ不可",
-                "CSV ファイル 1 件、素材フォルダー、PSD/PSB ファイル、または動画ファイルをドロップしてください。",
+                "CSV/.cutmgr ファイル 1 件、素材フォルダー、PSD/PSB ファイル、"
+                "動画ファイル、または動画を含む Roll フォルダーをドロップしてください。",
             )
             return False
 
@@ -1487,6 +1824,16 @@ class MainWindow(QMainWindow):
     def import_video_files(self, video_paths: list[Path]) -> bool:
         if not self.current_file_path:
             QMessageBox.information(self, "動画反映", "先に CSV を開くか新規作成してください。")
+            return False
+
+        # ドロップされたフォルダー（Roll フォルダー等）は中の動画ファイルへ展開する。
+        video_paths = self._gather_video_files(video_paths)
+        if not video_paths:
+            QMessageBox.information(
+                self,
+                "動画反映",
+                "ドロップしたフォルダー／ファイルに動画が見つかりませんでした。",
+            )
             return False
 
         delivery_date = QDate.currentDate().toString(IMPORT_DATE_FORMAT)
@@ -1640,9 +1987,9 @@ class MainWindow(QMainWindow):
         elif self.current_file_path:
             start_path = self.current_file_path
         else:
-            start_path = str(Path.cwd() / "cut_list.csv")
+            start_path = str(Path.cwd() / f"cut_list{PROJECT_FILE_EXTENSION}")
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "CSV の保存先を選択", start_path, CSV_FILE_FILTER)
+        file_path, _ = QFileDialog.getSaveFileName(self, "保存先を選択", start_path, CSV_FILE_FILTER)
         if not file_path:
             return None
 
@@ -1671,6 +2018,9 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _set_drag_feedback(self, active: bool) -> None:
+        # 状態が変わらないドラッグ移動中は、重いスタイル再適用を行わない。
+        if self._drag_feedback_active == active:
+            return
         self._drag_feedback_active = active
         self.drop_hint_label.setVisible(active)
         self._apply_theme_styles()
@@ -2128,9 +2478,11 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _normalize_csv_path(file_path: str) -> str:
         normalized = QDir.toNativeSeparators(file_path)
-        if normalized.casefold().endswith(".csv"):
+        lowered = normalized.casefold()
+        if any(lowered.endswith(extension) for extension in SUPPORTED_PROJECT_EXTENSIONS):
             return normalized
-        return f"{normalized}.csv"
+        # 拡張子が無い場合は独自拡張子 .cutmgr を既定にする。
+        return f"{normalized}{PROJECT_FILE_EXTENSION}"
 
     @staticmethod
     def _extract_drop_paths(event) -> list[Path]:
@@ -2166,21 +2518,78 @@ class MainWindow(QMainWindow):
         if not paths:
             return "unsupported"
 
-        csv_paths = [path for path in paths if path.is_file() and path.suffix.casefold() == ".csv"]
+        csv_paths = [
+            path
+            for path in paths
+            if path.is_file() and path.suffix.casefold() in SUPPORTED_PROJECT_EXTENSIONS
+        ]
+        if len(csv_paths) == 1 and len(paths) == 1:
+            return "csv"
+
+        # 動画ファイル、または動画を含むフォルダー（Roll フォルダー等）は動画取り込み。
+        video_entries = [path for path in paths if MainWindow._is_video_drop_entry(path)]
+        if video_entries and len(video_entries) == len(paths):
+            return "videos"
+
         material_paths = [
             path
             for path in paths
             if path.is_dir() or (path.is_file() and path.suffix.casefold() in BG_FILE_EXTENSIONS)
         ]
-        video_paths = [path for path in paths if path.is_file() and path.suffix.casefold() in VIDEO_FILE_EXTENSIONS]
-
-        if len(csv_paths) == 1 and len(paths) == 1:
-            return "csv"
         if material_paths and len(material_paths) == len(paths):
             return "folders"
-        if video_paths and len(video_paths) == len(paths):
-            return "videos"
         return "unsupported"
+
+    @staticmethod
+    def _is_video_drop_entry(path: Path) -> bool:
+        if path.is_file():
+            return path.suffix.casefold() in VIDEO_FILE_EXTENSIONS
+        if path.is_dir():
+            return MainWindow._folder_contains_videos(path)
+        return False
+
+    @staticmethod
+    def _folder_contains_videos(folder: Path) -> bool:
+        # 動画が 1 つでも見つかれば True。巨大フォルダーでの走査コストを抑えるため件数上限を設ける。
+        scanned = 0
+        try:
+            for child in folder.rglob("*"):
+                scanned += 1
+                if scanned > 5000:
+                    break
+                if child.suffix.casefold() in VIDEO_FILE_EXTENSIONS:
+                    return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def _gather_video_files(paths: list[Path]) -> list[Path]:
+        video_files: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            candidates: list[Path] = []
+            if path.is_file() and path.suffix.casefold() in VIDEO_FILE_EXTENSIONS:
+                candidates = [path]
+            elif path.is_dir():
+                try:
+                    candidates = sorted(
+                        (
+                            child
+                            for child in path.rglob("*")
+                            if child.is_file() and child.suffix.casefold() in VIDEO_FILE_EXTENSIONS
+                        ),
+                        key=lambda child: str(child).casefold(),
+                    )
+                except OSError:
+                    candidates = []
+            for candidate in candidates:
+                key = str(candidate.resolve(strict=False)).casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                video_files.append(candidate)
+        return video_files
 
     def _can_accept_paths(self, paths: list[Path]) -> bool:
         return self._classify_drop_paths(paths) != "unsupported"

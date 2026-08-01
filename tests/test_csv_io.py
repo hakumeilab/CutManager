@@ -19,7 +19,10 @@ class CsvIoTests(unittest.TestCase):
 
             result = load_csv_file(str(csv_path))
 
-        self.assertEqual(result.rows[0], ["001", "", "", "", "2", "2026/04/15", "", "", "T", "1", "2026/04/16"])
+        self.assertEqual(
+            result.rows[0],
+            ["001", "", "", "", "2", "2026/04/15", "", "", "T", "1", "2026/04/16", "", "", ""],
+        )
 
 
 if __name__ == "__main__":

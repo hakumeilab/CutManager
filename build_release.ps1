@@ -11,6 +11,7 @@ $pythonExe = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $deployExe = Join-Path $repoRoot ".venv\Scripts\pyside6-deploy.exe"
 $distDir = Join-Path $repoRoot "dist"
 $defaultIconPath = Join-Path $repoRoot "assets\cutmanager_icon.ico"
+$ffmpegExePath = Join-Path $repoRoot "assets\ffmpeg\ffmpeg.exe"
 
 $versionMatch = Select-String -Path $versionFile -Pattern '__version__ = "(?<version>[^"]+)"'
 if (-not $versionMatch) {
@@ -58,6 +59,61 @@ function Set-SpecValue {
     }
 
     throw "Key '$Key' in section '$Section' was not found in $specTemplatePath."
+}
+
+function Initialize-FfmpegBinary {
+    param(
+        [string]$TargetPath
+    )
+
+    if (Test-Path -LiteralPath $TargetPath) {
+        Write-Host "ffmpeg already present: $TargetPath"
+        return
+    }
+
+    $targetDir = Split-Path -Path $TargetPath -Parent
+    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+
+    $downloadUrl = if ($env:CUTMANAGER_FFMPEG_URL) {
+        $env:CUTMANAGER_FFMPEG_URL
+    }
+    else {
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    }
+
+    $tempZip = Join-Path $env:TEMP "cutmanager-ffmpeg.zip"
+    $tempExtract = Join-Path $env:TEMP "cutmanager-ffmpeg-extract"
+
+    Write-Host "Downloading ffmpeg from $downloadUrl ..."
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempZip -UseBasicParsing
+
+    if (Test-Path -LiteralPath $tempExtract) {
+        Remove-Item -LiteralPath $tempExtract -Recurse -Force
+    }
+    Expand-Archive -LiteralPath $tempZip -DestinationPath $tempExtract -Force
+
+    $found = Get-ChildItem -Path $tempExtract -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+    if (-not $found) {
+        throw "ffmpeg.exe was not found in the downloaded archive."
+    }
+
+    Copy-Item -LiteralPath $found.FullName -Destination $TargetPath -Force
+
+    # GPL 準拠: 同梱バイナリのライセンス文書も取り出して配布物に含める。
+    $licenseTarget = Join-Path $targetDir "ffmpeg-LICENSE.txt"
+    $licenseSource = Get-ChildItem -Path $tempExtract -Recurse -Include "LICENSE*", "COPYING*" |
+        Sort-Object { $_.Length } -Descending |
+        Select-Object -First 1
+    if ($licenseSource) {
+        Copy-Item -LiteralPath $licenseSource.FullName -Destination $licenseTarget -Force
+    }
+    else {
+        Write-Warning "FFmpeg license file was not found in the archive."
+    }
+
+    Remove-Item -LiteralPath $tempZip -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "ffmpeg ready: $TargetPath"
 }
 
 function Get-InnoSetupCompilerPath {
@@ -110,13 +166,20 @@ function New-InstallerScriptContent {
         [string]$Version,
         [string]$SourceExePath,
         [string]$OutputDirectory,
-        [string]$IconPath
+        [string]$IconPath,
+        [string]$NoticesPath
     )
 
     $escapedSourceExePath = Convert-InnoSetupString -Value $SourceExePath
     $escapedOutputDirectory = Convert-InnoSetupString -Value $OutputDirectory
     $escapedIconPath = Convert-InnoSetupString -Value $IconPath
     $setupIconLine = if ($IconPath) { "SetupIconFile=$escapedIconPath" } else { "" }
+    $noticesFileLine = if ($NoticesPath) {
+        'Source: "{0}"; DestDir: "{{app}}"; DestName: "THIRD_PARTY_NOTICES.txt"; Flags: ignoreversion' -f (Convert-InnoSetupString -Value $NoticesPath)
+    }
+    else {
+        ""
+    }
 
     return @"
 [Setup]
@@ -138,6 +201,7 @@ $setupIconLine
 
 [Files]
 Source: "$escapedSourceExePath"; DestDir: "{app}"; DestName: "CutManager.exe"; Flags: ignoreversion
+$noticesFileLine
 
 [Icons]
 Name: "{autoprograms}\CutManager"; Filename: "{app}\CutManager.exe"
@@ -159,6 +223,9 @@ try {
             throw "Dependency installation failed with exit code $LASTEXITCODE."
         }
     }
+
+    # サムネイル高速生成用の ffmpeg を用意する（同梱対象。無ければ取得する）。
+    Initialize-FfmpegBinary -TargetPath $ffmpegExePath
 
     $tempSpecPath = Join-Path $env:TEMP "CutManager-release-$version.spec"
     $tempInstallerScriptPath = Join-Path $env:TEMP "CutManager-installer-$version.iss"
@@ -240,11 +307,14 @@ try {
 
     $innoSetupCompilerPath = Get-InnoSetupCompilerPath
     if ($innoSetupCompilerPath) {
+        $noticesPath = Join-Path $repoRoot "THIRD_PARTY_NOTICES.md"
+        $normalizedNoticesPath = if (Test-Path -LiteralPath $noticesPath) { $noticesPath } else { "" }
         $installerScriptContent = New-InstallerScriptContent `
             -Version $version `
             -SourceExePath $releaseOnefileExePath `
             -OutputDirectory $distDir `
-            -IconPath $normalizedIconPath
+            -IconPath $normalizedIconPath `
+            -NoticesPath $normalizedNoticesPath
         Set-Content -LiteralPath $tempInstallerScriptPath -Value $installerScriptContent -Encoding ASCII
 
         & $innoSetupCompilerPath $tempInstallerScriptPath

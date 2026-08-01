@@ -25,7 +25,6 @@ from PySide6.QtGui import (
     QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
-    QKeySequence,
     QPainter,
     QPalette,
     QPen,
@@ -77,6 +76,7 @@ from .model import CutTableModel, NON_DATA_COLUMNS
 from .proxy import CutFilterProxyModel
 from .thumbnails import ThumbnailProvider
 from .settings_dialog import SettingsDialog
+from .shortcuts import ShortcutManager
 from .update_manager import (
     RELEASES_PAGE_URL,
     PreparedUpdate,
@@ -251,6 +251,7 @@ class MainWindow(QMainWindow):
         self._restoring_header_state = False
         self._syncing_section_size = False
         self.settings = QSettings("CutManager", "CutManager")
+        self.shortcut_manager = ShortcutManager(self.settings)
         self.recent_files = self._load_recent_files()
 
         self.model = CutTableModel(parent=self)
@@ -322,41 +323,32 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self) -> None:
         self.new_action = QAction("新規作成", self)
-        self.new_action.setShortcut(QKeySequence.StandardKey.New)
         self.new_action.triggered.connect(self.create_new_csv)
 
         self.open_action = QAction("開く", self)
-        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self.open_csv_dialog)
 
         self.save_action = QAction("上書き保存", self)
-        self.save_action.setShortcut(QKeySequence.StandardKey.Save)
         self.save_action.triggered.connect(self.save_csv)
 
         self.save_as_action = QAction("名前を付けて保存", self)
-        self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.save_as_action.triggered.connect(self.save_csv_as)
 
         self.undo_action = QAction("元に戻す", self)
-        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.undo_action.setEnabled(False)
         self.undo_action.triggered.connect(self.undo)
 
         self.redo_action = QAction("やり直し", self)
-        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         self.redo_action.setEnabled(False)
         self.redo_action.triggered.connect(self.redo)
 
         self.copy_action = QAction("コピー", self)
-        self.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
         self.copy_action.triggered.connect(self.copy_selected_cells)
 
         self.paste_action = QAction("貼り付け", self)
-        self.paste_action.setShortcut(QKeySequence.StandardKey.Paste)
         self.paste_action.triggered.connect(self.paste_cells_from_clipboard)
 
         self.add_row_action = QAction("行追加", self)
-        self.add_row_action.setShortcut(QKeySequence("Insert"))
         self.add_row_action.triggered.connect(lambda checked=False: self.add_row())
 
         self.add_row_above_action = QAction("上に行を追加", self)
@@ -366,7 +358,6 @@ class MainWindow(QMainWindow):
         self.add_row_below_action.triggered.connect(self.add_row_below)
 
         self.delete_row_action = QAction("行削除", self)
-        self.delete_row_action.setShortcut(QKeySequence("Ctrl+Delete"))
         self.delete_row_action.triggered.connect(self.delete_selected_rows)
 
         self.clear_values_action = QAction("値を削除", self)
@@ -410,6 +401,25 @@ class MainWindow(QMainWindow):
             self.license_info_action,
         ):
             self.addAction(action)
+
+        # 環境設定で変更できるショートカットと対象アクションの対応表。
+        self._shortcut_actions = {
+            "new": self.new_action,
+            "open": self.open_action,
+            "save": self.save_action,
+            "save_as": self.save_as_action,
+            "undo": self.undo_action,
+            "redo": self.redo_action,
+            "copy": self.copy_action,
+            "paste": self.paste_action,
+            "add_row": self.add_row_action,
+            "delete_row": self.delete_row_action,
+        }
+        self._apply_shortcuts()
+
+    def _apply_shortcuts(self) -> None:
+        for key, action in self._shortcut_actions.items():
+            action.setShortcuts(self.shortcut_manager.key_sequences(key))
 
     def _build_ui(self) -> None:
         self.setWindowTitle(WINDOW_TITLE)
@@ -1412,13 +1422,19 @@ class MainWindow(QMainWindow):
         return [line.split("\t") for line in lines] if lines else []
 
     def open_settings_dialog(self) -> None:
-        dialog = SettingsDialog(self.history.limit, self)
+        dialog = SettingsDialog(
+            self.history.limit,
+            self.shortcut_manager.all_sequences(),
+            self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         new_limit = dialog.undo_limit()
         self.history.set_limit(new_limit)
         self._save_undo_limit(new_limit)
+        self.shortcut_manager.update(dialog.shortcuts())
+        self._apply_shortcuts()
         self.statusBar().showMessage(f"アンドゥ履歴数を {new_limit} 回に設定しました。", 4000)
 
     def check_for_updates(self) -> None:

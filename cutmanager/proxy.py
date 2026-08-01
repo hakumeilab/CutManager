@@ -7,7 +7,10 @@ class CutFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._allowed_values_by_column: dict[int, set[str]] = {}
-        self.setDynamicSortFilter(True)
+        # 動的フィルターを無効化し、絞り込み中にセルを編集しても行が抜け落ちないようにする。
+        # フィルターの再評価はフィルター条件を変えたとき（invalidateFilter）だけ行う。
+        # 並べ替えはソースモデル側で行うため、この設定はソートには影響しない。
+        self.setDynamicSortFilter(False)
         self.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseSensitive)
 
     def set_allowed_values(self, column: int, values: set[str] | None) -> None:

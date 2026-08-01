@@ -1040,7 +1040,11 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard_or_save():
             return
 
-        target_path = self._choose_save_path()
+        # 既存ファイルを開いていても、新規作成では現在名を引き継がず
+        # 新規既定名（cut_list.cutmgr）を提示する。フォルダーは現在の場所を活かす。
+        base_dir = Path(self.current_file_path).parent if self.current_file_path else Path.cwd()
+        suggested_path = str(base_dir / f"cut_list{PROJECT_FILE_EXTENSION}")
+        target_path = self._choose_save_path(suggested_path)
         if not target_path:
             return
 

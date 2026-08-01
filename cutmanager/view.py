@@ -211,13 +211,79 @@ class CutItemDelegate(QStyledItemDelegate):
         super().setEditorData(editor, index)
 
     def setModelData(self, editor, model, index) -> None:
+        value = self._editor_value(editor)
+        if value is None:
+            super().setModelData(editor, model, index)
+            return
+
+        # 複数セルを選択した状態での編集は、同じ列の選択セルすべてへ同じ値を入れる。
+        fill_targets = self._fill_targets(model, index)
+        if not fill_targets:
+            model.setData(index, value, Qt.ItemDataRole.EditRole)
+            return
+        self._commit_with_fill(model, index, value, fill_targets)
+
+    @staticmethod
+    def _editor_value(editor) -> str | None:
         if isinstance(editor, QComboBox):
-            model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
-            return
+            return editor.currentText()
         if isinstance(editor, QDateEdit):
-            model.setData(index, editor.date().toString("yyyy/MM/dd"), Qt.ItemDataRole.EditRole)
+            return editor.date().toString("yyyy/MM/dd")
+        if isinstance(editor, QLineEdit):
+            return editor.text()
+        return None
+
+    def _fill_targets(self, model, index) -> list[QModelIndex]:
+        view = self.parent()
+        if not isinstance(view, QAbstractItemView):
+            return []
+        selection_model = view.selectionModel()
+        if selection_model is None:
+            return []
+        selected = selection_model.selectedIndexes()
+        if len(selected) <= 1:
+            return []
+
+        column = index.column()
+        targets: list[QModelIndex] = []
+        for other in selected:
+            if other.column() != column:
+                continue
+            if other.row() == index.row():
+                continue
+            if not bool(other.flags() & Qt.ItemFlag.ItemIsEditable):
+                continue
+            targets.append(QModelIndex(other))
+        return targets
+
+    def _commit_with_fill(self, model, index, value: str, targets: list[QModelIndex]) -> None:
+        source_model = getattr(model, "sourceModel", lambda: None)()
+        map_to_source = getattr(model, "mapToSource", None)
+        apply_changes = getattr(source_model, "apply_cell_changes", None)
+        if source_model is None or map_to_source is None or apply_changes is None:
+            # プロキシ/一括APIが無い場合は 1 セルずつ書き込む。
+            model.setData(index, value, Qt.ItemDataRole.EditRole)
+            for target in targets:
+                model.setData(target, value, Qt.ItemDataRole.EditRole)
             return
-        super().setModelData(editor, model, index)
+
+        actual_rows = source_model.actual_row_count()
+        changes: list[tuple[int, int, str]] = []
+        primary_is_virtual = False
+        for proxy_index in [index, *targets]:
+            source_index = map_to_source(proxy_index)
+            if source_index.row() >= actual_rows:
+                # 末尾の仮想（空）行はここでは扱えないため個別に委譲する。
+                if proxy_index is index:
+                    primary_is_virtual = True
+                continue
+            changes.append((source_index.row(), source_index.column(), value))
+
+        if primary_is_virtual:
+            model.setData(index, value, Qt.ItemDataRole.EditRole)
+        if changes:
+            # 1 回の履歴コマンドにまとめ、まとめてアンドゥできるようにする。
+            apply_changes(changes)
 
     def paint(self, painter, option, index) -> None:
         if index.column() == COLUMN_THUMBNAIL:

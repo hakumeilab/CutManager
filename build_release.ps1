@@ -211,7 +211,9 @@ Name: "{autodesktop}\CutManager"; Filename: "{app}\CutManager.exe"; Tasks: deskt
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Run]
-Filename: "{app}\CutManager.exe"; Description: "Launch CutManager"; Flags: nowait postinstall skipifsilent
+; skipifsilent は付けない: アプリ内更新は /SILENT で起動するため、
+; サイレントインストールでも完了後に CutManager を自動再起動する。
+Filename: "{app}\CutManager.exe"; Description: "Launch CutManager"; Flags: nowait postinstall
 "@
 }
 

@@ -1504,10 +1504,9 @@ class MainWindow(QMainWindow):
             message_box.setInformativeText("\n".join(info_lines))
             update_button = None
             if asset is not None:
-                update_label = "ダウンロードして更新"
-                if asset.suffix == ".exe":
-                    update_label = "インストーラーを起動"
-                update_button = message_box.addButton(update_label, QMessageBox.ButtonRole.AcceptRole)
+                update_button = message_box.addButton(
+                    "ダウンロードして更新", QMessageBox.ButtonRole.AcceptRole
+                )
             open_release_button = message_box.addButton("リリースページを開く", QMessageBox.ButtonRole.ActionRole)
             close_button = message_box.addButton("閉じる", QMessageBox.ButtonRole.RejectRole)
             message_box.setDefaultButton(close_button)
@@ -1624,11 +1623,11 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard_or_save():
             return False
 
-        mode_label = "インストーラーを起動" if prepared_update.mode == "installer" else "更新を適用"
         answer = QMessageBox.question(
             self,
             "更新を適用",
-            f"{mode_label}するため、CutManager を終了します。続行しますか。",
+            "インストーラーを起動して更新するため、CutManager を終了します。\n"
+            "更新後は自動的に再起動します。続行しますか。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )

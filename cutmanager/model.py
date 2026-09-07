@@ -9,15 +9,21 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from .constants import (
+    BG_STATE_APPROVED,
+    BG_STATE_RAW,
     COLUMN_AB_GROUP,
     COLUMN_BG_LOAD_COUNT,
+    COLUMN_BG_STATE,
     COLUMN_CUT_NUMBER,
     COLUMN_STATUS,
     COLUMN_THUMBNAIL,
     COLUMN_TP_LOAD_COUNT,
+    COLUMN_TP_STATE,
     COLUMN_VIDEO_PATH,
     CSV_HEADERS,
     STATUS_OPTIONS,
+    TP_STATE_CHECKED,
+    TP_STATE_UNCHECKED,
 )
 
 # ユーザーが直接編集できない列（プログラムが管理する）。
@@ -320,11 +326,47 @@ class CutTableModel(QAbstractTableModel):
         if changed_columns:
             self.contentChanged.emit(sorted(set(changed_columns)))
 
+    def _with_material_state_side_effects(
+        self, changes: list[tuple[int, int, str]]
+    ) -> list[tuple[int, int, str]]:
+        """TP/BG 状態の変更に合わせて入れ回数を仮素材 / 本番素材へ合わせる。
+
+        仮素材（未検査 / 素上がり）は入れ回数 0、本番素材（検査済み / 演出OK）は
+        入れ回数 1 から数えるため、0 と 1 の間だけ自動で切り替える。
+        リテイク（2 以降）や入れ回数を同時に編集した場合は手入力を優先して触らない。
+        """
+
+        extended = list(changes)
+        explicit_cells = {(row, column) for row, column, _ in changes}
+        state_columns = {
+            COLUMN_TP_STATE: (COLUMN_TP_LOAD_COUNT, TP_STATE_UNCHECKED, "BGOnly"),
+            COLUMN_BG_STATE: (COLUMN_BG_LOAD_COUNT, BG_STATE_RAW, "全セル"),
+        }
+
+        for row, column, value in changes:
+            target = state_columns.get(column)
+            if target is None or not 0 <= row < len(self._rows):
+                continue
+            count_column, provisional_state, special_value = target
+            if (row, count_column) in explicit_cells:
+                continue
+            current_count = self._rows[row][count_column].strip()
+            if current_count == special_value:
+                continue
+            new_state = str(value or "").strip()
+            if new_state == provisional_state:
+                if current_count == "1":
+                    extended.append((row, count_column, "0"))
+            elif new_state and current_count in ("", "0"):
+                extended.append((row, count_column, "1"))
+
+        return extended
+
     def _prepare_cell_changes(self, changes: list[tuple[int, int, str]]) -> list[CellChange]:
         prepared: list[CellChange] = []
         seen: set[tuple[int, int]] = set()
 
-        for row, column, value in changes:
+        for row, column, value in self._with_material_state_side_effects(changes):
             if not 0 <= column < len(CSV_HEADERS):
                 continue
             if column in NON_DATA_COLUMNS:
@@ -358,7 +400,13 @@ class CutTableModel(QAbstractTableModel):
             self._rows[change.row][change.column] = value
             changed_cells[change.row].add(change.column)
             changed_columns.add(change.column)
-            if change.column in (COLUMN_STATUS, COLUMN_TP_LOAD_COUNT, COLUMN_BG_LOAD_COUNT):
+            if change.column in (
+                COLUMN_STATUS,
+                COLUMN_TP_LOAD_COUNT,
+                COLUMN_BG_LOAD_COUNT,
+                COLUMN_TP_STATE,
+                COLUMN_BG_STATE,
+            ):
                 rows_requiring_full_repaint.add(change.row)
                 self._clear_row_color_cache(change.row)
 
@@ -524,15 +572,38 @@ class CutTableModel(QAbstractTableModel):
         return self._blend_colors(base_color, accent_color, mix_ratio)
 
     def _special_count_cell_background(self, row: int, column: int) -> QColor | None:
-        if not self._is_special_count_cell(row, column):
+        if self._is_special_count_cell(row, column):
+            palette = QApplication.palette()
+            base_color = self._base_row_color(row, palette)
+            accent_color = self._status_accent_color(STATUS_MISSING)
+            if accent_color is None:
+                return None
+            mix_ratio = self._status_mix_ratio(STATUS_MISSING, palette)
+            return self._blend_colors(base_color, accent_color, mix_ratio)
+
+        accent_color = self._material_state_accent_color(row, column)
+        if accent_color is None:
             return None
         palette = QApplication.palette()
         base_color = self._base_row_color(row, palette)
-        accent_color = self._status_accent_color(STATUS_MISSING)
-        if accent_color is None:
-            return None
-        mix_ratio = self._status_mix_ratio(STATUS_MISSING, palette)
+        mix_ratio = 0.30 if self._is_dark_palette(palette) else 0.20
         return self._blend_colors(base_color, accent_color, mix_ratio)
+
+    def _material_state_accent_color(self, row: int, column: int) -> QColor | None:
+        """TP/BG 状態セルの色。完了側は緑、未完了側はアンバーで塗り分ける。"""
+
+        if not 0 <= row < len(self._rows):
+            return None
+        if column not in (COLUMN_TP_STATE, COLUMN_BG_STATE):
+            return None
+        value = self._rows[row][column].strip()
+        accent_by_value = {
+            TP_STATE_CHECKED: QColor("#22c55e"),
+            TP_STATE_UNCHECKED: QColor("#f59e0b"),
+            BG_STATE_APPROVED: QColor("#22c55e"),
+            BG_STATE_RAW: QColor("#f59e0b"),
+        }
+        return accent_by_value.get(value)
 
     def _row_foreground_color(self, row: int) -> QColor | None:
         palette = QApplication.palette()

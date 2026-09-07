@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import unittest
 
+from cutmanager.constants import BG_STATE_APPROVED, TP_STATE_CHECKED, TP_STATE_UNCHECKED
 from cutmanager.main_window import calculate_cut_summary
 
 
 class CutSummaryTests(unittest.TestCase):
     def test_special_count_values_exclude_unneeded_tp_and_bg(self) -> None:
         rows = [
-            ["001", "", "", "", "", "", "", "", "", "", ""],
-            ["002", "", "", "", "BGOnly", "", "1", "2026/06/16", "", "", ""],
-            ["003", "", "", "", "1", "2026/06/16", "全セル", "", "", "", "2026/06/16"],
-            ["004", "", "", "BANK", "", "", "", "", "", "", ""],
-            ["005", "", "", "欠番", "", "", "", "", "", "", ""],
-            ["006", "", "", "兼用", "1", "", "1", "", "", "", ""],
+            ["001", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["002", "", "", "", "BGOnly", "", "", "1", "2026/06/16", "", "", "", ""],
+            [
+                "003", "", "", "", "1", "2026/06/16", TP_STATE_CHECKED,
+                "全セル", "", "", "", "", "2026/06/16",
+            ],
+            ["004", "", "", "BANK", "", "", "", "", "", "", "", "", ""],
+            ["005", "", "", "欠番", "", "", "", "", "", "", "", "", ""],
+            [
+                "006", "", "", "兼用", "1", "", TP_STATE_UNCHECKED,
+                "1", "", BG_STATE_APPROVED, "", "", "",
+            ],
         ]
 
         summary = calculate_cut_summary(rows)
@@ -30,6 +37,8 @@ class CutSummaryTests(unittest.TestCase):
         self.assertEqual(summary["shared"], 1)
         self.assertEqual(summary["bank"], 1)
         self.assertEqual(summary["missing"], 1)
+        self.assertEqual(summary["tp_checked"], 1)
+        self.assertEqual(summary["bg_approved"], 1)
 
 
 if __name__ == "__main__":

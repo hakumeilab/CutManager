@@ -6,6 +6,10 @@ from pathlib import Path
 
 from .constants import (
     BG_FILE_EXTENSIONS,
+    BG_STATE_RAW,
+    COLUMN_BG_STATE,
+    COLUMN_TP_STATE,
+    TP_STATE_UNCHECKED,
     COLUMN_AB_GROUP,
     COLUMN_BG_DATE,
     COLUMN_BG_LOAD_COUNT,
@@ -248,11 +252,24 @@ def apply_material_updates(rows: list[list[str]], updates: list[MaterialRowUpdat
         if update.mark_compatible:
             row[COLUMN_STATUS] = "兼用"
         if update.tp_load_increment:
-            row[COLUMN_TP_LOAD_COUNT] = str(_parse_load_count(row[COLUMN_TP_LOAD_COUNT]) + update.tp_load_increment)
+            row[COLUMN_TP_LOAD_COUNT] = _advance_load_count(
+                row[COLUMN_TP_LOAD_COUNT],
+                update.tp_load_increment,
+                is_provisional=row[COLUMN_TP_STATE].strip() in ("", TP_STATE_UNCHECKED),
+            )
             row[COLUMN_TP_DATE] = update.tp_date
+            # 素材が入り直しても、検査状態を入力済みの行は上書きしない。
+            if not row[COLUMN_TP_STATE].strip():
+                row[COLUMN_TP_STATE] = TP_STATE_UNCHECKED
         if update.bg_load_increment:
-            row[COLUMN_BG_LOAD_COUNT] = str(_parse_load_count(row[COLUMN_BG_LOAD_COUNT]) + update.bg_load_increment)
+            row[COLUMN_BG_LOAD_COUNT] = _advance_load_count(
+                row[COLUMN_BG_LOAD_COUNT],
+                update.bg_load_increment,
+                is_provisional=row[COLUMN_BG_STATE].strip() in ("", BG_STATE_RAW),
+            )
             row[COLUMN_BG_DATE] = update.bg_date
+            if not row[COLUMN_BG_STATE].strip():
+                row[COLUMN_BG_STATE] = BG_STATE_RAW
 
     return updated_rows
 
@@ -292,15 +309,35 @@ def _build_material_row(
     row[COLUMN_AB_GROUP] = cut_identifier.ab_group
     row[COLUMN_STATUS] = "兼用" if is_compatible else ""
     if is_bg:
-        row[COLUMN_BG_LOAD_COUNT] = "1"
+        # 演出チェック前（素上がり）は入れ回数に数えないので 0 から始める。
+        row[COLUMN_BG_LOAD_COUNT] = "0"
         row[COLUMN_BG_DATE] = import_date
+        row[COLUMN_BG_STATE] = BG_STATE_RAW
     else:
-        row[COLUMN_TP_LOAD_COUNT] = "1"
+        # 未検査の TP 素材は入れ回数に数えないので 0 から始める。
+        row[COLUMN_TP_LOAD_COUNT] = "0"
         row[COLUMN_TP_DATE] = import_date
+        row[COLUMN_TP_STATE] = TP_STATE_UNCHECKED
     row[COLUMN_TAKE] = ""
     row[COLUMN_TAKE_NUMBER] = ""
     row[COLUMN_DELIVERY_DATE] = ""
     return row
+
+
+def _advance_load_count(current: str, increment: int, *, is_provisional: bool = True) -> str:
+    """素材入れの回数を進める。
+
+    1 回目の素材入れは仮素材なので `0`（入ってはいるが未カウント）、
+    2 回目の素材入れ、または仮素材なしで本番素材が直接入った場合は `1`、
+    それ以降のリテイクを `2` 以降として数える。
+    """
+
+    text = str(current or "").strip()
+    if not text:
+        # 仮素材として入る 1 回目だけ 0 から始める。本番直なら 1 から数える。
+        base = 0 if is_provisional else 1
+        return str(base + max(0, increment - 1))
+    return str(_parse_load_count(text) + increment)
 
 
 def _parse_load_count(value: str) -> int:

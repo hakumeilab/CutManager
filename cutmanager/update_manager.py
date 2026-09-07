@@ -1,14 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import re
-import sys
 import tempfile
 import urllib.error
 import urllib.request
-import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -25,6 +23,12 @@ RELEASES_PAGE_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPOSITORY}/rele
 HTTP_TIMEOUT_SECONDS = 20
 DOWNLOAD_CHUNK_SIZE = 1024 * 128
 
+# Inno Setup をサイレント実行するための引数。
+# 進捗バーのみ表示し、ウィザードやメッセージボックスを出さずに更新する。
+# インストーラーの [Run] は skipifsilent を付けていないため、
+# 更新完了後に CutManager 自身を再起動する。
+INSTALLER_SILENT_ARGS = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+
 
 class UpdateError(RuntimeError):
     pass
@@ -36,10 +40,16 @@ class UpdateAsset:
     download_url: str
     size: int
     content_type: str
+    sha256_url: str = ""
 
     @property
     def suffix(self) -> str:
         return Path(self.name).suffix.casefold()
+
+    @property
+    def is_installer(self) -> bool:
+        name = self.name.casefold()
+        return self.suffix == ".exe" and ("setup" in name or "installer" in name)
 
 
 @dataclass(slots=True)
@@ -63,9 +73,9 @@ class UpdateCheckResult:
 @dataclass(slots=True)
 class PreparedUpdate:
     launch_program: str
-    launch_arguments: list[str]
-    mode: str
-    downloaded_path: Path
+    launch_arguments: list[str] = field(default_factory=list)
+    mode: str = "installer"
+    downloaded_path: Path | None = None
 
 
 class UpdateCheckWorker(QObject):
@@ -118,6 +128,8 @@ def fetch_latest_release() -> ReleaseInfo:
 
     assets = [_parse_asset(raw_asset) for raw_asset in payload.get("assets", [])]
     selected_asset = _select_release_asset(assets)
+    if selected_asset is not None:
+        selected_asset.sha256_url = _find_checksum_url(assets, selected_asset.name)
 
     return ReleaseInfo(
         version=version,
@@ -158,103 +170,35 @@ def download_release_asset(
     except OSError as exc:
         raise UpdateError(f"更新ファイルを保存できませんでした: {exc}") from exc
 
+    _verify_downloaded_asset(asset, destination)
+
     if progress_callback is not None:
-        progress_callback(asset.size or destination.stat().st_size, asset.size or destination.stat().st_size)
+        final_size = asset.size or destination.stat().st_size
+        progress_callback(final_size, final_size)
 
     return destination
 
 
 def prepare_update(downloaded_path: Path) -> PreparedUpdate:
+    """ダウンロードした更新ファイルの適用方法を決める。
+
+    設計方針: アプリが自分自身の exe を書き換えることはしない。
+    更新は必ず Inno Setup 製インストーラー (setup.exe) に委譲する。
+    インストーラーは per-user (localappdata) にインストールするため管理者権限は不要で、
+    ファイル置換と再起動をインストーラー側が安全に行う。
+    """
     suffix = downloaded_path.suffix.casefold()
+    if suffix != ".exe":
+        raise UpdateError("対応していない更新ファイル形式です。インストーラー (.exe) を使用してください。")
 
-    if suffix == ".exe":
-        return _prepare_executable_update(downloaded_path)
-
-    if suffix != ".zip":
-        raise UpdateError("対応していない更新ファイル形式です。zip または exe を使用してください。")
-
-    if not can_apply_update_in_place():
-        raise UpdateError(
-            "zip 更新の自動適用は、Windows の配布版でのみ使用できます。"
-        )
-
-    current_executable = Path(sys.executable).resolve()
-    target_directory = current_executable.parent
-    extracted_root = _extract_update_archive(downloaded_path)
-    payload_root = _resolve_payload_root(extracted_root, current_executable.name)
-    relative_executable = _find_relative_executable(payload_root, current_executable.name)
-
-    script_path = downloaded_path.parent / "apply_cutmanager_update.ps1"
-    script_path.write_text(
-        _build_update_script(
-            stage_directory=payload_root,
-            target_directory=target_directory,
-            relative_executable=relative_executable,
-            process_id=os.getpid(),
-        ),
-        encoding="utf-8",
-    )
+    name = downloaded_path.name.casefold()
+    is_installer = "setup" in name or "installer" in name
+    arguments = list(INSTALLER_SILENT_ARGS) if is_installer else []
 
     return PreparedUpdate(
-        launch_program="powershell.exe",
-        launch_arguments=[
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script_path),
-        ],
-        mode="in-place",
-        downloaded_path=downloaded_path,
-    )
-
-
-def can_apply_update_in_place() -> bool:
-    return sys.platform.startswith("win") and _is_packaged_runtime()
-
-
-def _is_packaged_runtime() -> bool:
-    if bool(getattr(sys, "frozen", False)):
-        return True
-    return "__compiled__" in globals()
-
-
-def _prepare_executable_update(downloaded_path: Path) -> PreparedUpdate:
-    if not can_apply_update_in_place():
-        return PreparedUpdate(
-            launch_program=str(downloaded_path),
-            launch_arguments=[],
-            mode="installer",
-            downloaded_path=downloaded_path,
-        )
-
-    current_executable = Path(sys.executable).resolve()
-    downloaded_executable = downloaded_path.resolve()
-    if downloaded_executable == current_executable:
-        raise UpdateError("現在実行中のファイルと同じ exe は更新に使用できません。")
-
-    script_path = downloaded_path.parent / "apply_cutmanager_exe_update.ps1"
-    script_path.write_text(
-        _build_executable_update_script(
-            downloaded_executable=downloaded_executable,
-            target_executable=current_executable,
-            process_id=os.getpid(),
-        ),
-        encoding="utf-8",
-    )
-
-    return PreparedUpdate(
-        launch_program="powershell.exe",
-        launch_arguments=[
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script_path),
-        ],
-        mode="replace-exe",
+        launch_program=str(downloaded_path),
+        launch_arguments=arguments,
+        mode="installer",
         downloaded_path=downloaded_path,
     )
 
@@ -334,6 +278,15 @@ def _read_json(url: str) -> dict:
         raise UpdateError("更新情報の形式が不正です。") from exc
 
 
+def _read_text(url: str) -> str:
+    request = _build_request(url)
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError):
+        return ""
+
+
 def _parse_asset(payload: dict) -> UpdateAsset:
     return UpdateAsset(
         name=str(payload.get("name") or ""),
@@ -357,55 +310,88 @@ def _format_rate_limit_reset_time(value: str) -> str:
 
 
 def _select_release_asset(assets: list[UpdateAsset]) -> UpdateAsset | None:
-    ranked_assets: list[tuple[int, UpdateAsset]] = []
-    prefer_zip = can_apply_update_in_place()
-
-    for asset in assets:
-        if not asset.name or not asset.download_url:
-            continue
-        score = _asset_score(asset, prefer_zip=prefer_zip)
-        if score <= 0:
-            continue
-        ranked_assets.append((score, asset))
-
-    if not ranked_assets:
+    """更新に使う exe を選ぶ。setup 版インストーラーを最優先する。"""
+    candidates = [
+        asset
+        for asset in assets
+        if asset.name and asset.download_url and asset.suffix == ".exe"
+    ]
+    if not candidates:
         return None
 
-    ranked_assets.sort(
-        key=lambda item: (
-            item[0],
-            item[1].size,
-            item[1].name.casefold(),
-        ),
+    candidates.sort(
+        key=lambda asset: (_asset_score(asset), asset.size, asset.name.casefold()),
         reverse=True,
     )
-    return ranked_assets[0][1]
+    top = candidates[0]
+    if _asset_score(top) <= _MIN_ASSET_SCORE:
+        return None
+    return top
 
 
-def _asset_score(asset: UpdateAsset, *, prefer_zip: bool) -> int:
+_MIN_ASSET_SCORE = -100
+
+
+def _asset_score(asset: UpdateAsset) -> int:
     name = asset.name.casefold()
-    suffix = asset.suffix
-
-    if suffix == ".zip":
-        score = 140 if prefer_zip else 100
-    elif suffix == ".exe":
-        score = 220 if can_apply_update_in_place() else 200
-    else:
-        return -1
-
-    if "cutmanager" in name:
-        score += 50
+    score = 0
     if "setup" in name or "installer" in name:
-        score += 120
-    if "onefile" in name or "single-file" in name:
-        score += 40
-    if "standalone" in name or "portable" in name:
-        score += 30
-    if "windows" in name or "win" in name:
+        score += 100
+    if "cutmanager" in name:
         score += 20
+    if "onefile" in name or "portable" in name or "standalone" in name:
+        score += 5
+    if "windows" in name or "win" in name:
+        score += 5
     if "debug" in name or "symbols" in name or "tests" in name:
-        score -= 150
+        score -= 200
     return score
+
+
+def _find_checksum_url(assets: list[UpdateAsset], asset_name: str) -> str:
+    expected = f"{asset_name}.sha256.txt".casefold()
+    for asset in assets:
+        if asset.name.casefold() == expected and asset.download_url:
+            return asset.download_url
+    return ""
+
+
+def _verify_downloaded_asset(asset: UpdateAsset, destination: Path) -> None:
+    """sha256 チェックサムが公開されていれば検証する。
+
+    チェックサムを取得できない場合は検証をスキップする（更新自体は阻害しない）。
+    ハッシュが公開されていて不一致の場合のみ、改ざんの可能性として失敗させる。
+    """
+    if not asset.sha256_url:
+        return
+
+    checksum_text = _read_text(asset.sha256_url)
+    expected_hash = _parse_sha256_text(checksum_text)
+    if not expected_hash:
+        return
+
+    actual_hash = _compute_sha256(destination)
+    if actual_hash != expected_hash:
+        raise UpdateError(
+            "ダウンロードした更新ファイルの整合性チェックに失敗しました。\n"
+            "ネットワークの問題またはファイル破損の可能性があります。再試行してください。"
+        )
+
+
+def _parse_sha256_text(text: str) -> str:
+    for line in text.splitlines():
+        match = re.search(r"\b[0-9a-fA-F]{64}\b", line)
+        if match:
+            return match.group(0).casefold()
+    return ""
+
+
+def _compute_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest().casefold()
 
 
 def _version_key(version: str) -> tuple[tuple[int, int | str], ...]:
@@ -419,188 +405,3 @@ def _version_key(version: str) -> tuple[tuple[int, int | str], ...]:
         else:
             key.append((1, part.casefold()))
     return tuple(key)
-
-
-def _extract_update_archive(downloaded_path: Path) -> Path:
-    extract_root = downloaded_path.parent / "payload"
-    extract_root.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with zipfile.ZipFile(downloaded_path) as archive:
-            _safe_extract_archive(archive, extract_root)
-    except OSError as exc:
-        raise UpdateError(f"更新ファイルを展開できませんでした: {exc}") from exc
-    except zipfile.BadZipFile as exc:
-        raise UpdateError("更新ファイルの zip が壊れています。") from exc
-
-    return extract_root
-
-
-def _safe_extract_archive(archive: zipfile.ZipFile, destination: Path) -> None:
-    destination_resolved = destination.resolve()
-    for member in archive.infolist():
-        member_path = destination / member.filename
-        resolved_path = member_path.resolve(strict=False)
-        if destination_resolved not in resolved_path.parents and resolved_path != destination_resolved:
-            raise UpdateError("更新ファイルに不正なパスが含まれています。")
-    archive.extractall(destination)
-
-
-def _resolve_payload_root(extracted_root: Path, preferred_executable_name: str) -> Path:
-    preferred_path = extracted_root / preferred_executable_name
-    if preferred_path.exists():
-        return extracted_root
-
-    children = [child for child in extracted_root.iterdir()]
-    if len(children) == 1 and children[0].is_dir():
-        child = children[0]
-        if (child / preferred_executable_name).exists():
-            return child
-
-    executables = list(extracted_root.rglob("*.exe"))
-    if not executables:
-        raise UpdateError("更新 zip 内に実行ファイルが見つかりませんでした。")
-
-    common_parent = executables[0].parent
-    if all(executable.parent == common_parent for executable in executables):
-        return common_parent
-    return extracted_root
-
-
-def _find_relative_executable(payload_root: Path, preferred_executable_name: str) -> Path:
-    preferred_path = payload_root / preferred_executable_name
-    if preferred_path.exists():
-        return preferred_path.relative_to(payload_root)
-
-    executables = sorted(payload_root.rglob("*.exe"))
-    if not executables:
-        raise UpdateError("更新後に起動する実行ファイルが見つかりませんでした。")
-
-    ranked = sorted(
-        executables,
-        key=lambda path: (
-            _executable_score(path, preferred_executable_name),
-            path.name.casefold(),
-        ),
-        reverse=True,
-    )
-    return ranked[0].relative_to(payload_root)
-
-
-def _executable_score(path: Path, preferred_executable_name: str) -> int:
-    name = path.name.casefold()
-    score = 0
-    if name == preferred_executable_name.casefold():
-        score += 100
-    if "cutmanager" in name:
-        score += 50
-    if name == "main.exe":
-        score += 20
-    return score
-
-
-def _build_update_script(
-    *,
-    stage_directory: Path,
-    target_directory: Path,
-    relative_executable: Path,
-    process_id: int,
-) -> str:
-    stage_text = _powershell_literal(stage_directory)
-    target_text = _powershell_literal(target_directory)
-    relative_executable_text = _powershell_literal(relative_executable)
-
-    return (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$processIdToWait = {int(process_id)}\n"
-        f"$stageDir = '{stage_text}'\n"
-        f"$targetDir = '{target_text}'\n"
-        f"$relativeExe = '{relative_executable_text}'\n"
-        "function Sync-CutManagerDirectory {\n"
-        "    param(\n"
-        "        [string]$SourceDir,\n"
-        "        [string]$DestinationDir\n"
-        "    )\n"
-        "    New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null\n"
-        "    $sourceItems = @{}\n"
-        "    Get-ChildItem -LiteralPath $SourceDir -Force | ForEach-Object {\n"
-        "        $sourceItems[$_.Name] = $_\n"
-        "    }\n"
-        "    Get-ChildItem -LiteralPath $DestinationDir -Force | ForEach-Object {\n"
-        "        if (-not $sourceItems.ContainsKey($_.Name)) {\n"
-        "            Remove-Item -LiteralPath $_.FullName -Recurse -Force\n"
-        "        }\n"
-        "    }\n"
-        "    foreach ($entry in $sourceItems.GetEnumerator()) {\n"
-        "        $sourcePath = $entry.Value.FullName\n"
-        "        $destinationPath = Join-Path $DestinationDir $entry.Key\n"
-        "        if ($entry.Value.PSIsContainer) {\n"
-        "            Sync-CutManagerDirectory -SourceDir $sourcePath -DestinationDir $destinationPath\n"
-        "            continue\n"
-        "        }\n"
-        "        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force\n"
-        "    }\n"
-        "}\n"
-        "for ($i = 0; $i -lt 120; $i++) {\n"
-        "    $proc = Get-Process -Id $processIdToWait -ErrorAction SilentlyContinue\n"
-        "    if (-not $proc) { break }\n"
-        "    Start-Sleep -Milliseconds 500\n"
-        "}\n"
-        "Sync-CutManagerDirectory -SourceDir $stageDir -DestinationDir $targetDir\n"
-        "$targetExe = Join-Path $targetDir $relativeExe\n"
-        "Start-Sleep -Milliseconds 300\n"
-        "Start-Process -FilePath $targetExe\n"
-    )
-
-
-def _build_executable_update_script(
-    *,
-    downloaded_executable: Path,
-    target_executable: Path,
-    process_id: int,
-) -> str:
-    downloaded_text = _powershell_literal(downloaded_executable)
-    target_text = _powershell_literal(target_executable)
-    backup_executable = target_executable.with_suffix(target_executable.suffix + ".bak")
-    backup_text = _powershell_literal(backup_executable)
-
-    return (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$processIdToWait = {int(process_id)}\n"
-        f"$downloadedExe = '{downloaded_text}'\n"
-        f"$targetExe = '{target_text}'\n"
-        f"$backupExe = '{backup_text}'\n"
-        "for ($i = 0; $i -lt 120; $i++) {\n"
-        "    $proc = Get-Process -Id $processIdToWait -ErrorAction SilentlyContinue\n"
-        "    if (-not $proc) { break }\n"
-        "    Start-Sleep -Milliseconds 500\n"
-        "}\n"
-        "for ($i = 0; $i -lt 120; $i++) {\n"
-        "    try {\n"
-        "        if (Test-Path -LiteralPath $backupExe) {\n"
-        "            Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue\n"
-        "        }\n"
-        "        if (Test-Path -LiteralPath $targetExe) {\n"
-        "            Move-Item -LiteralPath $targetExe -Destination $backupExe -Force\n"
-        "        }\n"
-        "        break\n"
-        "    } catch {\n"
-        "        if ($i -eq 119) { throw }\n"
-        "        Start-Sleep -Milliseconds 500\n"
-        "    }\n"
-        "}\n"
-        "try {\n"
-        "    Move-Item -LiteralPath $downloadedExe -Destination $targetExe -Force\n"
-        "} catch {\n"
-        "    if ((-not (Test-Path -LiteralPath $targetExe)) -and (Test-Path -LiteralPath $backupExe)) {\n"
-        "        Move-Item -LiteralPath $backupExe -Destination $targetExe -Force\n"
-        "    }\n"
-        "    throw\n"
-        "}\n"
-        "Start-Sleep -Milliseconds 300\n"
-        "Start-Process -FilePath $targetExe\n"
-    )
-
-
-def _powershell_literal(path: Path) -> str:
-    return str(path).replace("'", "''")

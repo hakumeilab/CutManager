@@ -7,3 +7,5 @@ dist/
 CutManager.dist/
 CutManager.exe
 main.exe
+# 同梱用 ffmpeg（ビルド時に取得。リポジトリには含めない）
+assets/ffmpeg/

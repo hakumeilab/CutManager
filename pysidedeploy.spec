@@ -40,11 +40,11 @@ qml_files =
 excluded_qml_plugins = 
 
 # qt modules used. comma separated
-modules = Core,Gui,Widgets
+modules = Core,Gui,Widgets,Multimedia
 
 # qt plugins used by the application. only relevant for desktop deployment
 # for qt plugins used in android application see [android][plugins]
-plugins = accessiblebridge,egldeviceintegrations,generic,iconengines,imageformats,platforminputcontexts,platforms,platforms/darwin,platformthemes,styles,wayland-decoration-client,wayland-graphics-integration-client,wayland-shell-integration,xcbglintegrations
+plugins = accessiblebridge,egldeviceintegrations,generic,iconengines,imageformats,multimedia,platforminputcontexts,platforms,platforms/darwin,platformthemes,styles,wayland-decoration-client,wayland-graphics-integration-client,wayland-shell-integration,xcbglintegrations
 
 [android]
 
@@ -68,7 +68,9 @@ macos.permissions =
 mode = onefile
 
 # specify any extra nuitka arguments
-extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable
+# --include-data-files で ffmpeg.exe を onefile バンドルに同梱する（サムネイル高速生成用）。
+# build_release.ps1 が assets/ffmpeg/ffmpeg.exe を用意する。
+extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable --include-data-files=assets/ffmpeg/ffmpeg.exe=ffmpeg.exe --include-data-files=assets/ffmpeg/ffmpeg-LICENSE.txt=ffmpeg-LICENSE.txt --include-data-files=THIRD_PARTY_NOTICES.md=THIRD_PARTY_NOTICES.txt
 
 [buildozer]
 

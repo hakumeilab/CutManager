@@ -22,6 +22,38 @@ from .constants import (
 
 CUT_NUMBER_PATTERN = re.compile(r"(?<!\d)(\d{3})(?!\d)")
 CUT_IDENTIFIER_PATTERN = re.compile(r"(?<!\d)(\d{3})([A-Za-z]?)(?![A-Za-z0-9])")
+# フォルダー名の "roll01" 等（大文字小文字・区切り記号ゆれを許容）を抽出する。
+ROLL_PATTERN = re.compile(r"(?i)roll[ _\-]*(\d+)")
+# フォルダー名末尾付近の YYMMDD（6桁）を検出する。
+DELIVERY_DATE_PATTERN = re.compile(r"(?<!\d)(\d{2})(\d{2})(\d{2})(?!\d)")
+
+
+def extract_roll(name: str) -> str:
+    """フォルダー/ファイル名から Roll 値（例: "roll01"）を抽出する。無ければ空文字。"""
+    match = ROLL_PATTERN.search(str(name or ""))
+    if match is None:
+        return ""
+    return f"roll{match.group(1)}"
+
+
+def extract_delivery_date(name: str, date_format: str = "%Y/%m/%d") -> str:
+    """フォルダー/ファイル名末尾の YYMMDD を YYYY/MM/DD 文字列へ変換する。
+
+    複数該当した場合は最も右（末尾寄り）を採用する。世紀は 00-69→2000 年代、
+    70-99→1900 年代に固定する。妥当な日付が無ければ空文字を返す。
+    """
+    from datetime import date as _date
+
+    last_valid = ""
+    for match in DELIVERY_DATE_PATTERN.finditer(str(name or "")):
+        year_two, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        year = 2000 + year_two if year_two <= 69 else 1900 + year_two
+        try:
+            resolved = _date(year, month, day)
+        except ValueError:
+            continue
+        last_valid = resolved.strftime(date_format)
+    return last_valid
 
 
 @dataclass(frozen=True, slots=True)

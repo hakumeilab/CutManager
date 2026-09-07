@@ -11,7 +11,15 @@ LEGACY_HEADER_ALIASES = {
     "TP入れ回数": ("素材入れ回数",),
     "TP入れ日": ("素材入れ日",),
 }
-OPTIONAL_BACKFILL_HEADERS = {"メモ", "BG入れ回数", "BG入れ日"}
+OPTIONAL_BACKFILL_HEADERS = {
+    "メモ",
+    "BG入れ回数",
+    "BG入れ日",
+    # 新フォーマットで追加された列。旧CSVには無いため空文字で補完する。
+    "Roll",
+    "動画パス",
+    "サムネイル",
+}
 
 
 class CsvLoadError(Exception):

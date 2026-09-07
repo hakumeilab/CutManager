@@ -12,7 +12,37 @@ from cutmanager.constants import (
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
 )
-from cutmanager.folder_import import apply_material_updates, build_rows_from_dropped_folders
+from cutmanager.folder_import import (
+    apply_material_updates,
+    build_rows_from_dropped_folders,
+    extract_cut_identifiers,
+)
+
+
+class CutNumberExtractionTests(unittest.TestCase):
+    def _identifiers(self, name: str) -> list[tuple[str, str]]:
+        return [(item.cut_number, item.ab_group) for item in extract_cut_identifiers(name)]
+
+    def test_two_digit_cut_number(self) -> None:
+        self.assertEqual(self._identifiers("12"), [("12", "")])
+        self.assertEqual(self._identifiers("85A"), [("85", "A")])
+        self.assertEqual(self._identifiers("12_13"), [("12", ""), ("13", "")])
+
+    def test_four_digit_cut_number(self) -> None:
+        self.assertEqual(self._identifiers("1024"), [("1024", "")])
+        self.assertEqual(self._identifiers("cut1024B"), [("1024", "B")])
+
+    def test_three_digit_cut_number_is_unchanged(self) -> None:
+        self.assertEqual(self._identifiers("169_170"), [("169", ""), ("170", "")])
+        self.assertEqual(self._identifiers("085A"), [("085", "A")])
+
+    def test_roll_and_date_are_not_treated_as_cut_number(self) -> None:
+        self.assertEqual(self._identifiers("BMUM_roll01_260721"), [])
+        self.assertEqual(self._identifiers("take02"), [])
+
+    def test_five_or_more_digits_are_ignored(self) -> None:
+        self.assertEqual(self._identifiers("12345"), [])
+        self.assertEqual(self._identifiers("1"), [])
 
 
 class FolderImportTests(unittest.TestCase):
@@ -22,14 +52,16 @@ class FolderImportTests(unittest.TestCase):
             root.mkdir()
             (root / "001").mkdir()
             (root / "002A").mkdir()
+            (root / "12").mkdir()
+            (root / "1024B").mkdir()
 
             result = build_rows_from_dropped_folders([root], set(), "2026/04/16")
 
-        self.assertEqual(result.added_count, 2)
+        self.assertEqual(result.added_count, 4)
         self.assertEqual(result.failed_count, 0)
         self.assertEqual(
             {(row[COLUMN_CUT_NUMBER], row[COLUMN_AB_GROUP]) for row in result.rows},
-            {("001", ""), ("002", "A")},
+            {("001", ""), ("002", "A"), ("12", ""), ("1024", "B")},
         )
 
     def test_single_cut_folder_is_imported_even_if_it_contains_children(self) -> None:

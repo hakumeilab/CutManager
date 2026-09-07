@@ -20,8 +20,13 @@ from .constants import (
 )
 
 
-CUT_NUMBER_PATTERN = re.compile(r"(?<!\d)(\d{3})(?!\d)")
-CUT_IDENTIFIER_PATTERN = re.compile(r"(?<!\d)(\d{3})([A-Za-z]?)(?![A-Za-z0-9])")
+# カット番号は 2〜4 桁の数字を対象とする（例: 12 / 085 / 1024）。
+CUT_NUMBER_PATTERN = re.compile(r"(?<!\d)(\d{2,4})(?!\d)")
+CUT_IDENTIFIER_PATTERN = re.compile(r"(?<!\d)(\d{2,4})([A-Za-z]?)(?![A-Za-z0-9])")
+# "roll01" "take01" "tk2" 等、カット番号ではない数字の直前に現れる語。
+NON_CUT_PREFIX_PATTERN = re.compile(
+    r"(?i)(?:^|[^A-Za-z])(?:roll|take|tk|t|ep|episode|sc|scene|s|v|ver|version)[ _\-]*$"
+)
 # フォルダー名の "roll01" 等（大文字小文字・区切り記号ゆれを許容）を抽出する。
 ROLL_PATTERN = re.compile(r"(?i)roll[ _\-]*(\d+)")
 # フォルダー名末尾付近の YYMMDD（6桁）を検出する。
@@ -106,6 +111,8 @@ def extract_cut_identifiers(name: str) -> list[CutIdentifier]:
     cut_identifiers: list[CutIdentifier] = []
 
     for match in CUT_IDENTIFIER_PATTERN.finditer(name):
+        if _is_non_cut_number(name, match):
+            continue
         cut_identifier = CutIdentifier(
             cut_number=match.group(1),
             ab_group=match.group(2).upper(),
@@ -116,6 +123,18 @@ def extract_cut_identifiers(name: str) -> list[CutIdentifier]:
         cut_identifiers.append(cut_identifier)
 
     return cut_identifiers
+
+
+def iter_cut_identifier_matches(name: str) -> list[re.Match[str]]:
+    """カット番号として採用する正規表現マッチのみを返す。"""
+
+    return [match for match in CUT_IDENTIFIER_PATTERN.finditer(name) if not _is_non_cut_number(name, match)]
+
+
+def _is_non_cut_number(name: str, match: re.Match[str]) -> bool:
+    """roll01 / take02 のようにカット番号ではない数字かどうかを判定する。"""
+
+    return NON_CUT_PREFIX_PATTERN.search(name, 0, match.start()) is not None
 
 
 def extract_cut_numbers(name: str) -> list[str]:

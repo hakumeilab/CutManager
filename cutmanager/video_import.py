@@ -17,18 +17,18 @@ from .constants import (
     VIDEO_FILE_EXTENSIONS,
 )
 from .folder_import import (
-    CUT_IDENTIFIER_PATTERN,
     CutIdentifier,
     extract_cut_identifiers,
     extract_delivery_date,
     extract_roll,
+    iter_cut_identifier_matches,
     make_cut_key,
 )
 
 
 EXPLICIT_TAKE_PATTERN = re.compile(r"(?i)(?:^|[_\-\s])(take|tk|t)[_\-\s]*([0-9]{1,3})(?=$|[_\-\s])")
 SUFFIX_TAKE_PATTERN = re.compile(r"(?:^|[_\-\s])([A-Za-z])([0-9]{1,3})(?=$|[_\-\s])")
-NUMBER_GROUP_PATTERN = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")
+NUMBER_GROUP_PATTERN = re.compile(r"(?<!\d)(\d{1,4})(?!\d)")
 
 
 @dataclass(slots=True)
@@ -199,7 +199,7 @@ def _extract_take_info(stem: str, cut_identifiers: list[CutIdentifier]) -> tuple
         return ("T", explicit_match.group(2))
 
     last_cut_end = max(
-        (match.end() for match in CUT_IDENTIFIER_PATTERN.finditer(stem)),
+        (match.end() for match in iter_cut_identifier_matches(stem)),
         default=0,
     )
     suffix_match = None

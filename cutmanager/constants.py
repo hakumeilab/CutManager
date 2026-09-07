@@ -7,8 +7,10 @@ CSV_HEADERS = [
     "区分",
     "TP入れ回数",
     "TP入れ日",
+    "TP状態",
     "BG入れ回数",
     "BG入れ日",
+    "BG状態",
     "テイク",
     "テイク番号",
     "納品日",
@@ -23,21 +25,31 @@ COLUMN_AB_GROUP = 2
 COLUMN_STATUS = 3
 COLUMN_TP_LOAD_COUNT = 4
 COLUMN_TP_DATE = 5
-COLUMN_BG_LOAD_COUNT = 6
-COLUMN_BG_DATE = 7
-COLUMN_TAKE = 8
-COLUMN_TAKE_NUMBER = 9
-COLUMN_DELIVERY_DATE = 10
-COLUMN_ROLL = 11
-COLUMN_VIDEO_PATH = 12
-COLUMN_THUMBNAIL = 13
+COLUMN_TP_STATE = 6
+COLUMN_BG_LOAD_COUNT = 7
+COLUMN_BG_DATE = 8
+COLUMN_BG_STATE = 9
+COLUMN_TAKE = 10
+COLUMN_TAKE_NUMBER = 11
+COLUMN_DELIVERY_DATE = 12
+COLUMN_ROLL = 13
+COLUMN_VIDEO_PATH = 14
+COLUMN_THUMBNAIL = 15
 
 COLUMN_MATERIAL_LOAD_COUNT = COLUMN_TP_LOAD_COUNT
 COLUMN_MATERIAL_DATE = COLUMN_TP_DATE
 
 STATUS_OPTIONS = ("", "兼用", "BANK", "欠番")
-TP_LOAD_COUNT_OPTIONS = ("", "BGOnly", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
-BG_LOAD_COUNT_OPTIONS = ("", "全セル", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
+TP_LOAD_COUNT_OPTIONS = ("", "BGOnly", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
+BG_LOAD_COUNT_OPTIONS = ("", "全セル", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
+# TP 素材の検査状態。空欄は状態未設定として扱う。
+TP_STATE_UNCHECKED = "未検査"
+TP_STATE_CHECKED = "検査済み"
+TP_STATE_OPTIONS = ("", TP_STATE_UNCHECKED, TP_STATE_CHECKED)
+# BG 素材の仕上がり状態。空欄は状態未設定として扱う。
+BG_STATE_RAW = "素上がり"
+BG_STATE_APPROVED = "演出OK"
+BG_STATE_OPTIONS = ("", BG_STATE_RAW, BG_STATE_APPROVED)
 LEGACY_STATUS_HEADERS = ("兼用", "BANK", "欠番")
 STATUS_ROW_BACKGROUND_HEX = {
     "欠番": "#4b5563",

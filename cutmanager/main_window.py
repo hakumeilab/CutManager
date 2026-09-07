@@ -50,8 +50,10 @@ from PySide6.QtWidgets import (
 
 from .constants import (
     BG_FILE_EXTENSIONS,
+    BG_STATE_APPROVED,
     COLUMN_BG_DATE,
     COLUMN_BG_LOAD_COUNT,
+    COLUMN_BG_STATE,
     COLUMN_CUT_NUMBER,
     COLUMN_DELIVERY_DATE,
     COLUMN_THUMBNAIL,
@@ -62,9 +64,11 @@ from .constants import (
     COLUMN_STATUS,
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
+    COLUMN_TP_STATE,
     PROJECT_FILE_EXTENSION,
     PROJECT_SAVE_FILTER,
     SUPPORTED_PROJECT_EXTENSIONS,
+    TP_STATE_CHECKED,
     VIDEO_FILE_EXTENSIONS,
     WINDOW_SIZE,
     WINDOW_TITLE,
@@ -100,6 +104,8 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
     tp_done = 0
     total_bg = 0
     bg_done = 0
+    tp_checked = 0
+    bg_approved = 0
     remaining_tp = 0
     remaining_bg = 0
     remaining_delivery = 0
@@ -146,6 +152,11 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
         elif bg_required:
             remaining_bg += 1
 
+        if tp_required and normalized_row[COLUMN_TP_STATE].strip() == TP_STATE_CHECKED:
+            tp_checked += 1
+        if bg_required and normalized_row[COLUMN_BG_STATE].strip() == BG_STATE_APPROVED:
+            bg_approved += 1
+
     return {
         "total_cuts": total_cuts,
         "delivered": delivered,
@@ -156,6 +167,8 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
         "total_bg": total_bg,
         "bg_done": bg_done,
         "remaining_bg": remaining_bg,
+        "tp_checked": tp_checked,
+        "bg_approved": bg_approved,
         "shared": shared,
         "bank": bank,
         "missing": missing,
@@ -459,7 +472,7 @@ class MainWindow(QMainWindow):
         header.sectionMoved.connect(self._save_header_state)
         self._apply_theme_styles()
 
-        default_widths = [120, 180, 90, 110, 105, 115, 105, 115, 90, 105, 115, 80, 240, 110]
+        default_widths = [120, 180, 90, 110, 105, 115, 100, 105, 115, 100, 90, 105, 115, 80, 240, 110]
         for column, width in enumerate(default_widths):
             self.table_view.setColumnWidth(column, width)
         self._restore_header_state()
@@ -688,6 +701,8 @@ class MainWindow(QMainWindow):
             ("shared", "兼用カット", 0, 3),
             ("bank", "BANK数", 1, 3),
             ("missing", "欠番数", 2, 3),
+            ("tp_checked", "TP検査済み", 1, 4),
+            ("bg_approved", "BG演出OK", 2, 4),
         )
         for key, title, row, column in metric_positions:
             label = QLabel(ribbon)
@@ -707,9 +722,9 @@ class MainWindow(QMainWindow):
         memo_edit.setMaximumHeight(88)
         memo_edit.textChanged.connect(self._commit_summary_memo)
         self.summary_memo_edit = memo_edit
-        layout.addWidget(memo_edit, 0, 4, 3, 1)
+        layout.addWidget(memo_edit, 0, 5, 3, 1)
 
-        layout.setColumnStretch(4, 1)
+        layout.setColumnStretch(5, 1)
         outer_layout.addWidget(clip)
         QTimer.singleShot(0, self._initialize_summary_ribbon_body_geometry)
         return ribbon

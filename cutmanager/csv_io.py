@@ -19,6 +19,8 @@ OPTIONAL_BACKFILL_HEADERS = {
     "Roll",
     "動画パス",
     "サムネイル",
+    "TP状態",
+    "BG状態",
 }
 
 

@@ -35,16 +35,20 @@ from PySide6.QtWidgets import (
 
 from .constants import (
     BG_LOAD_COUNT_OPTIONS,
+    BG_STATE_OPTIONS,
     COLUMN_BG_DATE,
     COLUMN_BG_LOAD_COUNT,
+    COLUMN_BG_STATE,
     COLUMN_DELIVERY_DATE,
     COLUMN_STATUS,
     COLUMN_THUMBNAIL,
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
+    COLUMN_TP_STATE,
     COLUMN_VIDEO_PATH,
     STATUS_OPTIONS,
     TP_LOAD_COUNT_OPTIONS,
+    TP_STATE_OPTIONS,
 )
 
 
@@ -173,7 +177,7 @@ class CutItemDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         if self._candidate_options(index.column()) is not None:
             options = self._candidate_options(index.column()) or ()
-            editor = CandidateEditorComboBox(parent, editable=index.column() != COLUMN_STATUS)
+            editor = CandidateEditorComboBox(parent, editable=not self._is_fixed_options_column(index.column()))
             editor.addItems(options)
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
             editor.activated.connect(lambda *_args: self._commit_and_close(editor, move_down=True))
@@ -456,7 +460,17 @@ class CutItemDelegate(QStyledItemDelegate):
             return TP_LOAD_COUNT_OPTIONS
         if column == COLUMN_BG_LOAD_COUNT:
             return BG_LOAD_COUNT_OPTIONS
+        if column == COLUMN_TP_STATE:
+            return TP_STATE_OPTIONS
+        if column == COLUMN_BG_STATE:
+            return BG_STATE_OPTIONS
         return None
+
+    @staticmethod
+    def _is_fixed_options_column(column: int) -> bool:
+        """候補以外の値を入力させない列（プルダウン専用）。"""
+
+        return column in (COLUMN_STATUS, COLUMN_TP_STATE, COLUMN_BG_STATE)
 
     @classmethod
     def _is_candidate_column(cls, column: int) -> bool:

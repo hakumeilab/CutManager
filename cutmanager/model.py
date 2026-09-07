@@ -326,11 +326,47 @@ class CutTableModel(QAbstractTableModel):
         if changed_columns:
             self.contentChanged.emit(sorted(set(changed_columns)))
 
+    def _with_material_state_side_effects(
+        self, changes: list[tuple[int, int, str]]
+    ) -> list[tuple[int, int, str]]:
+        """TP/BG 状態の変更に合わせて入れ回数を仮素材 / 本番素材へ合わせる。
+
+        仮素材（未検査 / 素上がり）は入れ回数 0、本番素材（検査済み / 演出OK）は
+        入れ回数 1 から数えるため、0 と 1 の間だけ自動で切り替える。
+        リテイク（2 以降）や入れ回数を同時に編集した場合は手入力を優先して触らない。
+        """
+
+        extended = list(changes)
+        explicit_cells = {(row, column) for row, column, _ in changes}
+        state_columns = {
+            COLUMN_TP_STATE: (COLUMN_TP_LOAD_COUNT, TP_STATE_UNCHECKED, "BGOnly"),
+            COLUMN_BG_STATE: (COLUMN_BG_LOAD_COUNT, BG_STATE_RAW, "全セル"),
+        }
+
+        for row, column, value in changes:
+            target = state_columns.get(column)
+            if target is None or not 0 <= row < len(self._rows):
+                continue
+            count_column, provisional_state, special_value = target
+            if (row, count_column) in explicit_cells:
+                continue
+            current_count = self._rows[row][count_column].strip()
+            if current_count == special_value:
+                continue
+            new_state = str(value or "").strip()
+            if new_state == provisional_state:
+                if current_count == "1":
+                    extended.append((row, count_column, "0"))
+            elif new_state and current_count in ("", "0"):
+                extended.append((row, count_column, "1"))
+
+        return extended
+
     def _prepare_cell_changes(self, changes: list[tuple[int, int, str]]) -> list[CellChange]:
         prepared: list[CellChange] = []
         seen: set[tuple[int, int]] = set()
 
-        for row, column, value in changes:
+        for row, column, value in self._with_material_state_side_effects(changes):
             if not 0 <= column < len(CSV_HEADERS):
                 continue
             if column in NON_DATA_COLUMNS:

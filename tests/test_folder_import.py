@@ -15,6 +15,7 @@ from cutmanager.constants import (
     COLUMN_TP_DATE,
     COLUMN_TP_LOAD_COUNT,
     COLUMN_TP_STATE,
+    TP_STATE_CHECKED,
     TP_STATE_UNCHECKED,
 )
 from cutmanager.folder_import import (
@@ -25,6 +26,20 @@ from cutmanager.folder_import import (
 
 
 class MaterialLoadCountTests(unittest.TestCase):
+    def test_direct_final_material_starts_at_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "materials"
+            root.mkdir()
+            (root / "001").mkdir()
+
+            # 仮素材を経ずに本番素材が入るケース（状態が入力済みの既存行）。
+            rows = [["001", "", "", "", "", "", TP_STATE_CHECKED, "", "", "", "", "", ""]]
+            result = build_rows_from_dropped_folders([root], {("001", "")}, "2026/04/16")
+            rows = apply_material_updates(rows, result.updates)
+
+        self.assertEqual(rows[0][COLUMN_TP_LOAD_COUNT], "1")
+        self.assertEqual(rows[0][COLUMN_TP_STATE], TP_STATE_CHECKED)
+
     def test_first_material_is_not_counted_and_retakes_are(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "materials"
@@ -41,7 +56,7 @@ class MaterialLoadCountTests(unittest.TestCase):
 
         self.assertEqual(first.rows[0][COLUMN_TP_LOAD_COUNT], "0")
         self.assertEqual(first.rows[0][COLUMN_TP_STATE], TP_STATE_UNCHECKED)
-        # 2 回目 = リテイク 1 回目、3 回目 = リテイク 2 回目。
+        # 2 回目 = 本番素材で 1、3 回目 = リテイクで 2。
         self.assertEqual(rows[0][COLUMN_TP_LOAD_COUNT], "2")
         self.assertEqual(rows[0][COLUMN_TP_DATE], "2026/04/18")
 

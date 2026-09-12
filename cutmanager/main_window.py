@@ -98,7 +98,9 @@ from .video_import import apply_videos_to_rows, build_rows_from_video_files
 from .view import CutItemDelegate, CutTableView, FilterHeaderView
 
 
-def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
+def calculate_cut_summary(rows) -> dict[str, int]:
+    """カットの集計を求める。``rows`` は行を 1 回だけ走査できるものなら何でもよい。"""
+
     total_cuts = 0
     delivered = 0
     total_tp = 0
@@ -115,8 +117,7 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
     missing = 0
 
     for row in rows:
-        normalized_row = _normalize_summary_row(row)
-        status = normalized_row[COLUMN_STATUS].strip()
+        status = _summary_cell(row, COLUMN_STATUS).strip()
         if status == "欠番":
             missing += 1
             continue
@@ -128,13 +129,13 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
             bank += 1
             continue
 
-        if normalized_row[COLUMN_DELIVERY_DATE].strip():
+        if _summary_cell(row, COLUMN_DELIVERY_DATE).strip():
             delivered += 1
         else:
             remaining_delivery += 1
 
-        tp_value = normalized_row[COLUMN_TP_LOAD_COUNT].strip()
-        bg_value = normalized_row[COLUMN_BG_LOAD_COUNT].strip()
+        tp_value = _summary_cell(row, COLUMN_TP_LOAD_COUNT).strip()
+        bg_value = _summary_cell(row, COLUMN_BG_LOAD_COUNT).strip()
         tp_required = tp_value != "BGOnly"
         bg_required = bg_value != "全セル"
 
@@ -153,9 +154,9 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
         elif bg_required:
             remaining_bg += 1
 
-        if tp_required and normalized_row[COLUMN_TP_STATE].strip() == TP_STATE_CHECKED:
+        if tp_required and _summary_cell(row, COLUMN_TP_STATE).strip() == TP_STATE_CHECKED:
             tp_checked += 1
-        if bg_required and normalized_row[COLUMN_BG_STATE].strip() == BG_STATE_APPROVED:
+        if bg_required and _summary_cell(row, COLUMN_BG_STATE).strip() == BG_STATE_APPROVED:
             bg_approved += 1
 
     return {
@@ -176,11 +177,13 @@ def calculate_cut_summary(rows: list[list[str]]) -> dict[str, int]:
     }
 
 
-def _normalize_summary_row(row: list[str]) -> list[str]:
-    normalized = [""] * len(CSV_HEADERS)
-    for index in range(min(len(row), len(CSV_HEADERS))):
-        normalized[index] = "" if row[index] is None else str(row[index])
-    return normalized
+def _summary_cell(row: list[str], column: int) -> str:
+    """集計用に 1 セルを取り出す。短い行や None も空文字として扱う。"""
+
+    if column >= len(row):
+        return ""
+    value = row[column]
+    return "" if value is None else str(value)
 
 
 class RibbonToggleButton(QWidget):
@@ -251,6 +254,8 @@ class MainWindow(QMainWindow):
     # 変更の配信と自動保存をまとめるための待ち時間。連続入力で書き込みが暴れないようにする。
     COLLAB_PUBLISH_DELAY_MS = 400
     COLLAB_AUTOSAVE_DELAY_MS = 3000
+    # 進捗リボンは全行を数え直すため、連続入力中は間引いて更新する。
+    SUMMARY_REFRESH_DELAY_MS = 250
     DEFAULT_UNDO_LIMIT = 100
 
     def __init__(self) -> None:
@@ -265,6 +270,10 @@ class MainWindow(QMainWindow):
         self._drag_feedback_active = False
         self._drag_accept_cache: bool | None = None
         self._theme_apply_pending = False
+        self._status_update_pending = False
+        self._summary_refresh_timer = QTimer(self)
+        self._summary_refresh_timer.setSingleShot(True)
+        self._summary_refresh_timer.setInterval(self.SUMMARY_REFRESH_DELAY_MS)
         self._applying_theme_styles = False
         self._last_window_stylesheet = ""
         self._last_table_stylesheet = ""
@@ -351,7 +360,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._connect_theme_signals()
-        self._update_all_status()
+        self._flush_status_update()
+        self._update_summary_ribbon()
         self._restore_last_session_file()
         self._restore_collaboration()
 
@@ -616,6 +626,7 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(show_all_action)
 
     def _connect_signals(self) -> None:
+        self._summary_refresh_timer.timeout.connect(self._update_summary_ribbon)
         self.table_view.clearRequested.connect(self.clear_selected_cells)
         self.table_view.addRowRequested.connect(self.add_row)
         self.table_view.deleteRowsRequested.connect(self.delete_selected_rows)
@@ -666,6 +677,19 @@ class MainWindow(QMainWindow):
         self.history.cleanChanged.connect(lambda clean: self.model.set_modified(not clean))
 
     def _update_all_status(self) -> None:
+        """状態表示の更新を予約する。
+
+        1 回の編集で複数のシグナルが飛ぶため、そのまま処理すると全行走査の
+        集計が何度も走る。イベントループ 1 周につき 1 回にまとめる。
+        """
+
+        if self._status_update_pending:
+            return
+        self._status_update_pending = True
+        QTimer.singleShot(0, self._flush_status_update)
+
+    def _flush_status_update(self) -> None:
+        self._status_update_pending = False
         self._update_window_title()
         self._update_status_labels()
         self._update_summary_memo()
@@ -693,7 +717,7 @@ class MainWindow(QMainWindow):
 
         self.modified_label.setText("状態: 未保存" if self.model.is_modified() else "状態: 保存済み")
         self.drop_result_label.setText(f"D&D: {self.last_drop_summary}")
-        self._update_summary_ribbon()
+        self._schedule_summary_refresh()
 
     def _build_summary_ribbon(self) -> QWidget:
         ribbon = QWidget(self)
@@ -815,6 +839,10 @@ class MainWindow(QMainWindow):
         width = max(self.summary_ribbon_clip.width(), self.summary_ribbon_body.sizeHint().width())
         self.summary_ribbon_body.setGeometry(0, self.summary_ribbon_body.y(), width, height)
 
+    def _schedule_summary_refresh(self) -> None:
+        if not self._summary_refresh_timer.isActive():
+            self._summary_refresh_timer.start()
+
     def _update_summary_ribbon(self) -> None:
         if not self.summary_labels:
             return
@@ -828,7 +856,7 @@ class MainWindow(QMainWindow):
             label.setText(f"{title}: {value}")
 
     def _calculate_cut_summary(self) -> dict[str, int]:
-        return calculate_cut_summary(self.model.rows())
+        return calculate_cut_summary(self.model.iter_rows())
 
     def _update_summary_memo(self) -> None:
         if self.summary_memo_edit is None:
@@ -1580,7 +1608,7 @@ class MainWindow(QMainWindow):
     def _publish_local_changes(self) -> None:
         if not self.collab.is_active():
             return
-        self.collab.publish_rows(self.model.rows())
+        self.collab.publish_rows(self.model.iter_rows())
 
     def _publish_local_cursor(self, *_args) -> None:
         if not self.collab.is_active():
@@ -1593,18 +1621,15 @@ class MainWindow(QMainWindow):
         if not source_index.isValid():
             self.collab.publish_cursor("", "", -1)
             return
-        rows = self.model.rows()
-        if not 0 <= source_index.row() < len(rows):
-            self.collab.publish_cursor("", "", -1)
-            return
-        key = row_key(rows[source_index.row()])
+        row = self.model.row_at(source_index.row())
+        key = None if row is None else row_key(row)
         if key is None:
             self.collab.publish_cursor("", "", -1)
             return
         self.collab.publish_cursor(key[0], key[1], source_index.column())
 
     def _apply_remote_diff(self, diff) -> None:
-        new_rows, cell_updates, structural = apply_diff(self.model.rows(), diff)
+        new_rows, cell_updates, structural = apply_diff(self.model.iter_rows(), diff)
 
         self._applying_remote_change = True
         try:
@@ -1622,7 +1647,10 @@ class MainWindow(QMainWindow):
             self._applying_remote_change = False
 
         # 取り込んだ内容は配信済みの状態なので、送り返さないよう基準を更新する。
-        self.collab.adopt_rows(self.model.rows())
+        if structural:
+            self.collab.adopt_rows(self.model.iter_rows())
+        else:
+            self.collab.adopt_diff(diff)
         self._refresh_remote_cursors()
         self._collab_autosave_timer.start()
 
@@ -1631,10 +1659,12 @@ class MainWindow(QMainWindow):
         if not current_index.isValid():
             return None, -1
         source_index = self.proxy_model.mapToSource(current_index)
-        rows = self.model.rows()
-        if not source_index.isValid() or not 0 <= source_index.row() < len(rows):
+        if not source_index.isValid():
             return None, -1
-        return row_key(rows[source_index.row()]), source_index.column()
+        row = self.model.row_at(source_index.row())
+        if row is None:
+            return None, -1
+        return row_key(row), source_index.column()
 
     def _restore_cell_selection(self, key: tuple[str, str] | None, column: int) -> None:
         if key is None or column < 0:
@@ -1647,7 +1677,7 @@ class MainWindow(QMainWindow):
             self.table_view.setCurrentIndex(target_index)
 
     def _source_row_for_key(self, key: tuple[str, str]) -> int | None:
-        for index, row in enumerate(self.model.rows()):
+        for index, row in enumerate(self.model.iter_rows()):
             if row_key(row) == key:
                 return index
         return None
@@ -1661,14 +1691,20 @@ class MainWindow(QMainWindow):
             self.table_view.set_remote_cursors([])
             return
 
+        peers = self.collab.peers()
+        if not peers:
+            # 相手がいなければ全行の走査そのものを省く。
+            self.table_view.set_remote_cursors([])
+            return
+
         row_by_key: dict[tuple[str, str], int] = {}
-        for index, row in enumerate(self.model.rows()):
+        for index, row in enumerate(self.model.iter_rows()):
             key = row_key(row)
             if key is not None and key not in row_by_key:
                 row_by_key[key] = index
 
         cursors: list[tuple[int, int, str, str]] = []
-        for peer in self.collab.peers():
+        for peer in peers:
             key = peer.row_key
             if key is None or peer.column < 0:
                 continue

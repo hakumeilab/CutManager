@@ -30,10 +30,13 @@ from .constants import COLUMN_AB_GROUP, COLUMN_CUT_NUMBER, COLUMN_THUMBNAIL, CSV
 from .folder_import import make_cut_key
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 SYNC_DIR_SUFFIX = ".cutsync"
 PEERS_DIR_NAME = "peers"
 OPS_DIR_NAME = "ops"
+# 変更ログは 1 行 1 操作の JSON Lines。追記した分だけを読むため、
+# 編集が積み重なっても書き込み量も読み取り量も増えない。
+OPS_FILE_EXTENSION = ".jsonl"
 
 # サイドカーの読み取り間隔。SMB 越しでも負荷が軽く、体感はほぼ即時になる値。
 POLL_INTERVAL_MS = 1000
@@ -41,8 +44,10 @@ POLL_INTERVAL_MS = 1000
 PRESENCE_INTERVAL_MS = 2000
 # この秒数だけ更新が途絶えた参加者は離席扱いにする。
 PEER_TIMEOUT_SECONDS = 12.0
-# 1 セッションの変更ログに残す最大件数。超えたら古いものから捨てる。
-MAX_OPS_PER_SESSION = 400
+# 変更ログがこのサイズを超えたら、直近の操作だけ残して書き直す。
+OPS_FILE_MAX_BYTES = 256 * 1024
+# 書き直すときに残す操作の数。全員が 1 秒間隔で読むので、直近だけあれば足りる。
+OPS_ROTATE_KEEP = 50
 
 # サムネイルはローカルのキャッシュパスなので共有しない。
 NON_SYNCED_COLUMNS = frozenset({COLUMN_THUMBNAIL})
@@ -64,10 +69,14 @@ RowKey = tuple[str, str]
 def row_key(row: list[str]) -> RowKey | None:
     """行の同期キー。カット番号が空の行は同期できないので ``None``。"""
 
-    if not row:
+    size = len(row)
+    if size <= COLUMN_CUT_NUMBER:
         return None
-    cut_number = row[COLUMN_CUT_NUMBER] if len(row) > COLUMN_CUT_NUMBER else ""
-    ab_group = row[COLUMN_AB_GROUP] if len(row) > COLUMN_AB_GROUP else ""
+    cut_number = row[COLUMN_CUT_NUMBER]
+    if not cut_number:
+        # 空のカット番号が大半なので、strip する前にここで弾く。
+        return None
+    ab_group = row[COLUMN_AB_GROUP] if size > COLUMN_AB_GROUP else ""
     if not str(cut_number).strip():
         return None
     return make_cut_key(cut_number, ab_group)
@@ -109,6 +118,9 @@ def diff_snapshots(
         if old_row is None:
             added[key] = list(new_row)
             continue
+        if old_row == new_row:
+            # 大半の行は変わらない。列ごとの比較へ入る前にまとめて弾く。
+            continue
         changed = {
             column: new_row[column]
             for column in range(len(CSV_HEADERS))
@@ -122,14 +134,17 @@ def diff_snapshots(
     return RowDiff(cells=cells, added=added, removed=removed)
 
 
-def apply_diff(rows: list[list[str]], diff: RowDiff) -> tuple[list[list[str]], list[tuple[int, int, str]], bool]:
+def apply_diff(rows, diff: RowDiff) -> tuple[list[list[str]], list[tuple[int, int, str]], bool]:
     """差分を行リストへ取り込む。
 
     戻り値は ``(新しい行リスト, セル更新リスト, 行構成が変わったか)``。
     セル更新リストは行の増減が無いときに、モデルを作り直さず部分描画するために使う。
+
+    変更しない行は元のリスト要素をそのまま使い回す（書き換える行だけ複製する）。
+    全行を複製しないぶん速い代わりに、戻り値の行を直接書き換えてはいけない。
     """
 
-    new_rows = [list(row) for row in rows]
+    new_rows = list(rows)
     index_by_key: dict[RowKey, int] = {}
     for index, row in enumerate(new_rows):
         key = row_key(row)
@@ -138,6 +153,7 @@ def apply_diff(rows: list[list[str]], diff: RowDiff) -> tuple[list[list[str]], l
 
     cell_updates: list[tuple[int, int, str]] = []
     structural = False
+    copied: set[int] = set()
 
     for key, changes in diff.cells.items():
         index = index_by_key.get(key)
@@ -148,6 +164,9 @@ def apply_diff(rows: list[list[str]], diff: RowDiff) -> tuple[list[list[str]], l
                 continue
             if _cell(new_rows[index], column) == value:
                 continue
+            if index not in copied:
+                new_rows[index] = list(new_rows[index])
+                copied.add(index)
             new_rows[index][column] = value
             cell_updates.append((index, column, value))
             if column in (COLUMN_CUT_NUMBER, COLUMN_AB_GROUP):
@@ -235,7 +254,7 @@ class PeerCursor:
     def row_key(self) -> RowKey | None:
         if not self.cut_number:
             return None
-        return (self.cut_number, self.ab_group)
+        return make_cut_key(self.cut_number, self.ab_group)
 
 
 def peer_color(session_id: str) -> str:
@@ -274,6 +293,42 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
         raise
 
 
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _read_lines_from(path: Path, offset: int) -> tuple[list[str], int]:
+    """``offset`` から後ろを読み、行として完成している分だけ返す。
+
+    戻り値は ``(行のリスト, 読み進めたバイト数)``。書き込み途中で末尾が
+    途切れていた場合、その分は読み進めず次回に持ち越す。
+    """
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+    except OSError:
+        return [], 0
+
+    if not chunk:
+        return [], 0
+
+    end = chunk.rfind(b"\n")
+    if end < 0:
+        return [], 0
+
+    complete = chunk[: end + 1]
+    try:
+        text = complete.decode("utf-8")
+    except UnicodeDecodeError:
+        return [], len(complete)
+    return [line for line in text.splitlines() if line.strip()], len(complete)
+
+
 def _read_json(path: Path) -> dict | None:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -302,6 +357,8 @@ class CollabSession(QObject):
         self._ops: list[dict] = []
         self._snapshot: dict[RowKey, list[str]] = {}
         self._consumed: dict[str, int] = {}
+        # 参加者ごとの「どこまで読んだか」（変更ログ内のバイト位置）。
+        self._offsets: dict[str, int] = {}
         self._peers: list[PeerCursor] = []
         self._cursor: tuple[str, str, int] = ("", "", -1)
         self._poll_timer = QTimer(self)
@@ -348,13 +405,20 @@ class CollabSession(QObject):
         self._sequence = 0
         self._ops = []
         self._consumed = {}
+        self._offsets = {}
         self._peers = []
         self._active = True
 
-        # 既に置かれている変更ログは「参加より前の履歴」なので、読み飛ばし位置だけ合わせる。
-        for session_id, ops in self._read_peer_ops().items():
-            if ops:
-                self._consumed[session_id] = max(int(op.get("seq", 0)) for op in ops)
+        # 既に置かれている変更ログは「参加より前の履歴」なので、末尾から読み始める。
+        for entry in self._ops_entries():
+            if entry.stem != self.session_id:
+                self._offsets[entry.stem] = _file_size(entry)
+
+        # 自分のログは毎回まっさらから始める（seq もここで 1 に戻る）。
+        try:
+            self._ops_path().write_text("", encoding="utf-8")
+        except OSError as exc:
+            self.failed.emit(f"変更ログを初期化できませんでした: {exc}")
 
         self._publish_presence()
         self._poll_timer.start()
@@ -378,7 +442,7 @@ class CollabSession(QObject):
 
     # ------------------------------------------------------------------ 発信
 
-    def publish_rows(self, rows: list[list[str]]) -> None:
+    def publish_rows(self, rows) -> None:
         """ローカルの変更を差分として配信する。"""
 
         if not self._active or self._sync_dir is None:
@@ -391,30 +455,65 @@ class CollabSession(QObject):
             return
 
         self._sequence += 1
-        self._ops.append(
-            {
-                "seq": self._sequence,
-                "ts": time.time(),
-                "diff": diff_to_payload(diff),
-            }
-        )
-        if len(self._ops) > MAX_OPS_PER_SESSION:
-            del self._ops[: len(self._ops) - MAX_OPS_PER_SESSION]
+        operation = {
+            "version": PROTOCOL_VERSION,
+            "session": self.session_id,
+            "name": self._display_name,
+            "seq": self._sequence,
+            "ts": time.time(),
+            "diff": diff_to_payload(diff),
+        }
+        self._ops.append(operation)
+        if len(self._ops) > OPS_ROTATE_KEEP:
+            del self._ops[: len(self._ops) - OPS_ROTATE_KEEP]
 
+        ops_path = self._ops_path()
         try:
-            _write_json_atomic(
-                self._sync_dir / OPS_DIR_NAME / f"{self.session_id}.json",
-                {
-                    "version": PROTOCOL_VERSION,
-                    "session": self.session_id,
-                    "name": self._display_name,
-                    "ops": self._ops,
-                },
-            )
+            with ops_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(operation, ensure_ascii=False) + "\n")
+            self._rotate_ops_if_needed(ops_path)
         except OSError as exc:
             self.failed.emit(f"変更を共有できませんでした: {exc}")
 
-    def adopt_rows(self, rows: list[list[str]]) -> None:
+    def _rotate_ops_if_needed(self, ops_path: Path) -> None:
+        """ログが膨らんだら直近の操作だけ残して書き直す。"""
+
+        if _file_size(ops_path) <= OPS_FILE_MAX_BYTES:
+            return
+        recent = self._ops[-OPS_ROTATE_KEEP:]
+        body = "".join(json.dumps(operation, ensure_ascii=False) + "\n" for operation in recent)
+        temp_path = ops_path.with_name(f"{ops_path.name}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            temp_path.write_text(body, encoding="utf-8", newline="\n")
+            os.replace(temp_path, ops_path)
+        except OSError:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def adopt_diff(self, diff: RowDiff) -> None:
+        """受信して取り込んだ差分を、配信の基準へ反映する。
+
+        全行から作り直すより軽く、次の配信で送り返すことも防げる。
+        """
+
+        if not self._active:
+            return
+        for key, changes in diff.cells.items():
+            row = self._snapshot.get(key)
+            if row is None:
+                continue
+            for column, value in changes.items():
+                if 0 <= column < len(row):
+                    row[column] = value
+        for key in diff.removed:
+            if key not in diff.added:
+                self._snapshot.pop(key, None)
+        for key, row in diff.added.items():
+            self._snapshot[key] = list(row)
+
+    def adopt_rows(self, rows) -> None:
         """受信した変更を取り込んだ直後など、配信せずに基準だけ更新する。"""
 
         if self._active:
@@ -440,7 +539,7 @@ class CollabSession(QObject):
         merged_added: dict[RowKey, list[str]] = {}
         merged_removed: list[RowKey] = []
 
-        for session_id, ops in self._read_peer_ops().items():
+        for session_id, ops in self._read_new_peer_ops().items():
             last_seen = self._consumed.get(session_id, 0)
             highest = last_seen
             for op in sorted(ops, key=lambda item: int(item.get("seq", 0))):
@@ -468,25 +567,55 @@ class CollabSession(QObject):
 
     # ---------------------------------------------------------------- 内部処理
 
-    def _read_peer_ops(self) -> dict[str, list[dict]]:
+    def _ops_path(self, session_id: str | None = None) -> Path:
+        assert self._sync_dir is not None
+        name = session_id or self.session_id
+        return self._sync_dir / OPS_DIR_NAME / f"{name}{OPS_FILE_EXTENSION}"
+
+    def _ops_entries(self) -> list[Path]:
         if self._sync_dir is None:
-            return {}
-        ops_dir = self._sync_dir / OPS_DIR_NAME
-        result: dict[str, list[dict]] = {}
+            return []
         try:
-            entries = sorted(ops_dir.glob("*.json"))
+            return sorted((self._sync_dir / OPS_DIR_NAME).glob(f"*{OPS_FILE_EXTENSION}"))
         except OSError:
-            return {}
-        for entry in entries:
+            return []
+
+    def _read_new_peer_ops(self) -> dict[str, list[dict]]:
+        """各参加者の変更ログのうち、前回読んだ位置より後ろだけを読む。"""
+
+        result: dict[str, list[dict]] = {}
+        for entry in self._ops_entries():
             session_id = entry.stem
             if session_id == self.session_id:
                 continue
-            payload = _read_json(entry)
-            if not payload or int(payload.get("version", 0)) != PROTOCOL_VERSION:
+
+            offset = self._offsets.get(session_id, 0)
+            size = _file_size(entry)
+            if size == offset:
+                # 追記が無いので読み込み自体を省く。待機中はここで終わる。
                 continue
-            ops = payload.get("ops")
-            if isinstance(ops, list):
-                result[session_id] = [op for op in ops if isinstance(op, dict)]
+            if size < offset:
+                # ログが書き直された。先頭から読み直し、seq で二重取り込みを防ぐ。
+                offset = 0
+
+            lines, consumed_bytes = _read_lines_from(entry, offset)
+            self._offsets[session_id] = offset + consumed_bytes
+            if not lines:
+                continue
+
+            ops: list[dict] = []
+            for line in lines:
+                try:
+                    operation = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(operation, dict):
+                    continue
+                if int(operation.get("version", 0)) != PROTOCOL_VERSION:
+                    continue
+                ops.append(operation)
+            if ops:
+                result[session_id] = ops
         return result
 
     def _refresh_peers(self) -> None:
@@ -532,7 +661,7 @@ class CollabSession(QObject):
         # 十分に古い置き土産だけ掃除する（時計ずれで生きている参加者を消さない）。
         if idle_seconds < PEER_TIMEOUT_SECONDS * 10:
             return
-        for target in (entry, entry.parent.parent / OPS_DIR_NAME / f"{session_id}.json"):
+        for target in (entry, entry.parent.parent / OPS_DIR_NAME / f"{session_id}{OPS_FILE_EXTENSION}"):
             try:
                 target.unlink(missing_ok=True)
             except OSError:

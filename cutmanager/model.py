@@ -69,8 +69,10 @@ class RowsSnapshotCommand(HistoryCommand):
         changed_columns: list[int] | None = None,
     ) -> None:
         self._model = model
-        self._old_rows = [row.copy() for row in old_rows]
-        self._new_rows = [row.copy() for row in new_rows]
+        # 行そのものは書き換えず必ず差し替えるため、履歴は行を共有して持てる。
+        # 全行を複製しないので、行数が多いファイルでも履歴が重くならない。
+        self._old_rows = list(old_rows)
+        self._new_rows = list(new_rows)
         self._changed_columns = [] if changed_columns is None else list(changed_columns)
 
     def redo(self) -> None:
@@ -150,9 +152,10 @@ class CutTableModel(QAbstractTableModel):
             if text == "":
                 return False
 
-            new_rows = self.rows()
-            new_rows.append(self._blank_row())
-            new_rows[index.row()][index.column()] = text
+            new_rows = list(self._rows)
+            appended_row = self._blank_row()
+            appended_row[index.column()] = text
+            new_rows.append(appended_row)
             self._apply_rows_snapshot(new_rows, modified=True, changed_columns=[index.column()])
             return True
 
@@ -200,7 +203,7 @@ class CutTableModel(QAbstractTableModel):
     def insert_blank_row(self, position: int | None = None) -> QModelIndex:
         actual_count = len(self._rows)
         insert_at = actual_count if position is None else max(0, min(position, actual_count))
-        new_rows = self.rows()
+        new_rows = list(self._rows)
         new_rows.insert(insert_at, self._blank_row())
         self._apply_rows_snapshot(new_rows, modified=True)
         return self.index(insert_at, 0)
@@ -208,7 +211,7 @@ class CutTableModel(QAbstractTableModel):
     def append_rows(self, rows: list[list[str]]) -> None:
         if not rows:
             return
-        new_rows = self.rows()
+        new_rows = list(self._rows)
         new_rows.extend(self._normalize_row(row) for row in rows)
         self._apply_rows_snapshot(new_rows, modified=True)
 
@@ -218,7 +221,7 @@ class CutTableModel(QAbstractTableModel):
             return 0
 
         target_set = set(targets)
-        new_rows = [row.copy() for index, row in enumerate(self._rows) if index not in target_set]
+        new_rows = [row for index, row in enumerate(self._rows) if index not in target_set]
         self._apply_rows_snapshot(new_rows, modified=True)
         return len(targets)
 
@@ -294,6 +297,22 @@ class CutTableModel(QAbstractTableModel):
     def rows(self) -> list[list[str]]:
         return [row.copy() for row in self._rows]
 
+    def row_at(self, row: int) -> list[str] | None:
+        """1 行を読み取り専用で返す。範囲外なら ``None``。"""
+
+        if not 0 <= row < len(self._rows):
+            return None
+        return self._rows[row]
+
+    def iter_rows(self):
+        """内部の行をそのまま順に返す（読み取り専用）。
+
+        集計や同期のように「読むだけ」の処理で、全行コピーを避けるために使う。
+        返された行を書き換えてはいけない。
+        """
+
+        return iter(self._rows)
+
     def unique_column_values(self, column: int) -> list[str]:
         if not 0 <= column < len(CSV_HEADERS):
             return []
@@ -347,7 +366,7 @@ class CutTableModel(QAbstractTableModel):
     ) -> None:
         normalized_rows = [self._normalize_row(row) for row in new_rows]
         if modified and self._history is not None:
-            self._history.push(RowsSnapshotCommand(self, self.rows(), normalized_rows, changed_columns))
+            self._history.push(RowsSnapshotCommand(self, self._rows, normalized_rows, changed_columns))
             return
 
         self._replace_rows_internal(normalized_rows, changed_columns)
@@ -428,12 +447,17 @@ class CutTableModel(QAbstractTableModel):
         changed_columns: set[int] = set()
         rows_requiring_full_repaint: set[int] = set()
 
+        copied_rows: set[int] = set()
         for change in changes:
             if not 0 <= change.row < len(self._rows):
                 continue
             value = change.new_value if use_new_values else change.old_value
             if self._rows[change.row][change.column] == value:
                 continue
+            if change.row not in copied_rows:
+                # 履歴やスナップショットと行を共有しているので、書き換える前に複製する。
+                self._rows[change.row] = list(self._rows[change.row])
+                copied_rows.add(change.row)
             self._rows[change.row][change.column] = value
             changed_cells[change.row].add(change.column)
             changed_columns.add(change.column)
@@ -519,10 +543,21 @@ class CutTableModel(QAbstractTableModel):
 
     @classmethod
     def _normalize_row(cls, values: list[str]) -> list[str]:
+        if cls._is_normalized(values):
+            # 既に整った行は複製せずそのまま使う（行は書き換えずに差し替える）。
+            return values
         normalized = cls._blank_row()
         for index in range(min(len(values), len(CSV_HEADERS))):
             normalized[index] = "" if values[index] is None else str(values[index])
         return normalized
+
+    @staticmethod
+    def _is_normalized(values) -> bool:
+        return (
+            type(values) is list
+            and len(values) == len(CSV_HEADERS)
+            and all(type(value) is str for value in values)
+        )
 
     @classmethod
     def _sort_row_list(cls, rows: list[list[str]], column: int, order: Qt.SortOrder) -> None:

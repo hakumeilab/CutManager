@@ -25,6 +25,7 @@ from cutmanager.constants import (
     COLUMN_THUMBNAIL,
     CSV_HEADERS,
 )
+from cutmanager.folder_import import make_cut_key
 
 
 def _app() -> QCoreApplication:
@@ -32,6 +33,10 @@ def _app() -> QCoreApplication:
     if app is None:
         app = QCoreApplication([])
     return app
+
+
+def _key(cut_number: str, ab_group: str = "") -> tuple[str, str]:
+    return make_cut_key(cut_number, ab_group)
 
 
 def _row(cut_number: str, memo: str = "", ab_group: str = "") -> list[str]:
@@ -44,7 +49,7 @@ def _row(cut_number: str, memo: str = "", ab_group: str = "") -> list[str]:
 
 class RowKeyTest(unittest.TestCase):
     def test_key_uses_cut_number_and_ab_group(self) -> None:
-        self.assertEqual(row_key(_row("001", ab_group="a")), ("001", "A"))
+        self.assertEqual(row_key(_row("001", ab_group="a")), _key("001", "A"))
 
     def test_row_without_cut_number_has_no_key(self) -> None:
         self.assertIsNone(row_key(_row("", memo="下書き")))
@@ -52,8 +57,8 @@ class RowKeyTest(unittest.TestCase):
 
     def test_snapshot_keeps_first_row_for_duplicate_keys(self) -> None:
         snapshot = snapshot_rows([_row("001", "先"), _row("001", "後"), _row("", "無視")])
-        self.assertEqual(list(snapshot), [("001", "")])
-        self.assertEqual(snapshot[("001", "")][COLUMN_MEMO], "先")
+        self.assertEqual(list(snapshot), [_key("001")])
+        self.assertEqual(snapshot[_key("001")][COLUMN_MEMO], "先")
 
 
 class DiffTest(unittest.TestCase):
@@ -61,14 +66,14 @@ class DiffTest(unittest.TestCase):
         old = snapshot_rows([_row("001", "旧")])
         new = snapshot_rows([_row("001", "新")])
         diff = diff_snapshots(old, new)
-        self.assertEqual(diff.cells, {("001", ""): {COLUMN_MEMO: "新"}})
+        self.assertEqual(diff.cells, {_key("001"): {COLUMN_MEMO: "新"}})
         self.assertFalse(diff.added)
         self.assertFalse(diff.removed)
 
     def test_detects_added_and_removed_rows(self) -> None:
         diff = diff_snapshots(snapshot_rows([_row("001")]), snapshot_rows([_row("002")]))
-        self.assertEqual(list(diff.added), [("002", "")])
-        self.assertEqual(diff.removed, (("001", ""),))
+        self.assertEqual(list(diff.added), [_key("002")])
+        self.assertEqual(diff.removed, (_key("001"),))
 
     def test_thumbnail_column_is_not_shared(self) -> None:
         old_row = _row("001")
@@ -85,7 +90,7 @@ class DiffTest(unittest.TestCase):
 class ApplyDiffTest(unittest.TestCase):
     def test_cell_update_keeps_row_order_and_reports_cells(self) -> None:
         rows = [_row("001", "旧"), _row("002")]
-        diff = RowDiff(cells={("001", ""): {COLUMN_MEMO: "新"}}, added={}, removed=())
+        diff = RowDiff(cells={_key("001"): {COLUMN_MEMO: "新"}}, added={}, removed=())
         new_rows, cell_updates, structural = apply_diff(rows, diff)
         self.assertFalse(structural)
         self.assertEqual(cell_updates, [(0, COLUMN_MEMO, "新")])
@@ -93,7 +98,7 @@ class ApplyDiffTest(unittest.TestCase):
 
     def test_unknown_key_is_ignored_for_cell_updates(self) -> None:
         rows = [_row("001")]
-        diff = RowDiff(cells={("999", ""): {COLUMN_MEMO: "x"}}, added={}, removed=())
+        diff = RowDiff(cells={_key("999"): {COLUMN_MEMO: "x"}}, added={}, removed=())
         new_rows, cell_updates, structural = apply_diff(rows, diff)
         self.assertEqual(new_rows, rows)
         self.assertEqual(cell_updates, [])
@@ -101,7 +106,7 @@ class ApplyDiffTest(unittest.TestCase):
 
     def test_added_row_is_appended_as_structural_change(self) -> None:
         rows = [_row("001")]
-        diff = RowDiff(cells={}, added={("002", ""): _row("002", "追加")}, removed=())
+        diff = RowDiff(cells={}, added={_key("002"): _row("002", "追加")}, removed=())
         new_rows, cell_updates, structural = apply_diff(rows, diff)
         self.assertTrue(structural)
         self.assertEqual(cell_updates, [])
@@ -109,21 +114,21 @@ class ApplyDiffTest(unittest.TestCase):
 
     def test_removed_row_is_dropped(self) -> None:
         rows = [_row("001"), _row("002")]
-        diff = RowDiff(cells={}, added={}, removed=(("001", ""),))
+        diff = RowDiff(cells={}, added={}, removed=(_key("001"),))
         new_rows, _cell_updates, structural = apply_diff(rows, diff)
         self.assertTrue(structural)
         self.assertEqual([row[COLUMN_CUT_NUMBER] for row in new_rows], ["002"])
 
     def test_existing_row_is_not_duplicated_by_added_entry(self) -> None:
         rows = [_row("001", "こちらの値")]
-        diff = RowDiff(cells={}, added={("001", ""): _row("001", "あちらの値")}, removed=())
+        diff = RowDiff(cells={}, added={_key("001"): _row("001", "あちらの値")}, removed=())
         new_rows, _cell_updates, structural = apply_diff(rows, diff)
         self.assertEqual(len(new_rows), 1)
         self.assertFalse(structural)
 
     def test_cut_number_change_is_treated_as_structural(self) -> None:
         rows = [_row("001")]
-        diff = RowDiff(cells={("001", ""): {COLUMN_CUT_NUMBER: "001A"}}, added={}, removed=())
+        diff = RowDiff(cells={_key("001"): {COLUMN_CUT_NUMBER: "001A"}}, added={}, removed=())
         new_rows, cell_updates, structural = apply_diff(rows, diff)
         self.assertTrue(structural)
         self.assertEqual(cell_updates, [])
@@ -133,9 +138,9 @@ class ApplyDiffTest(unittest.TestCase):
 class PayloadTest(unittest.TestCase):
     def test_round_trip(self) -> None:
         diff = RowDiff(
-            cells={("001", "A"): {COLUMN_MEMO: "メモ"}},
-            added={("002", ""): _row("002")},
-            removed=(("003", ""),),
+            cells={_key("001", "A"): {COLUMN_MEMO: "メモ"}},
+            added={_key("002"): _row("002")},
+            removed=(_key("003"),),
         )
         restored = payload_to_diff(diff_to_payload(diff))
         self.assertEqual(restored.cells, diff.cells)
@@ -262,7 +267,7 @@ class CollabSessionTest(unittest.TestCase):
 
         peers = self.bob.peers()
         self.assertEqual([peer.name for peer in peers], ["アリス"])
-        self.assertEqual(peers[0].row_key, ("002", ""))
+        self.assertEqual(peers[0].row_key, _key("002"))
         self.assertEqual(peers[0].column, COLUMN_MEMO)
         self.assertEqual(peers[0].color, self.alice.color())
 

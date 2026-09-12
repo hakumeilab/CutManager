@@ -51,5 +51,25 @@ class VideoImportTests(unittest.TestCase):
         self.assertEqual(four_metadata.take_number, "2")
 
 
+    def test_leading_zero_differences_match_existing_rows(self) -> None:
+        rows = [
+            ["01", "", "", "", "", "", "", "", "", "", ""],
+            ["002", "", "A", "", "", "", "", "", "", "", ""],
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            padded = temp_path / "001_take01.mov"
+            unpadded = temp_path / "02A_take02.mov"
+            padded.write_bytes(b"a")
+            unpadded.write_bytes(b"b")
+
+            result = apply_videos_to_rows([padded, unpadded], rows, "2026/04/16")
+
+        self.assertEqual(result.updated_count, 2)
+        self.assertEqual(result.unmatched_count, 0)
+        self.assertEqual(result.unmatched_files, [])
+
+
 if __name__ == "__main__":
     unittest.main()

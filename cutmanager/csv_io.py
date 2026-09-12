@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,17 +90,30 @@ def load_csv_file(path: str) -> CsvLoadResult:
 def save_csv_file(path: str, rows: list[list[str]]) -> None:
     csv_path = Path(path)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    # 同じフォルダーへ一時ファイルを書いてから置き換える。共同編集で共有ファイルを
+    # 頻繁に書くため、途中まで書かれたファイルを他の人に読ませないようにする。
+    temp_path = csv_path.with_name(f"{csv_path.name}.{uuid.uuid4().hex[:8]}.tmp")
 
     try:
-        with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        with temp_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.writer(handle, delimiter=",")
             writer.writerow(CSV_HEADERS)
             for row in rows:
                 writer.writerow(_normalize_row(row))
+        os.replace(temp_path, csv_path)
     except OSError as exc:
+        _discard_temp_file(temp_path)
         raise CsvLoadError(f"CSV を保存できませんでした: {exc}") from exc
     except csv.Error as exc:
+        _discard_temp_file(temp_path)
         raise CsvLoadError(f"CSV の保存に失敗しました: {exc}") from exc
+
+
+def _discard_temp_file(temp_path: Path) -> None:
+    try:
+        temp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _map_source_row(

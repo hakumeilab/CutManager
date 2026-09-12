@@ -197,6 +197,8 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\CutManager.exe
+; .cutmgr の関連付けを登録するため、完了時にシェルへ変更を通知する。
+ChangesAssociations=yes
 $setupIconLine
 
 [Files]
@@ -209,6 +211,20 @@ Name: "{autodesktop}\CutManager"; Filename: "{app}\CutManager.exe"; Tasks: deskt
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+Name: "associatefiles"; Description: "Associate .cutmgr files with CutManager"; GroupDescription: "File associations:"
+
+[Registry]
+; 管理者権限なしで入れるため、関連付けはすべて現在のユーザー (HKCU) へ登録する。
+Root: HKCU; Subkey: "Software\Classes\.cutmgr"; ValueType: string; ValueName: ""; ValueData: "CutManager.Project"; Flags: uninsdeletevalue; Tasks: associatefiles
+Root: HKCU; Subkey: "Software\Classes\.cutmgr\OpenWithProgids"; ValueType: string; ValueName: "CutManager.Project"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associatefiles
+Root: HKCU; Subkey: "Software\Classes\CutManager.Project"; ValueType: string; ValueName: ""; ValueData: "CutManager Project"; Flags: uninsdeletekey; Tasks: associatefiles
+Root: HKCU; Subkey: "Software\Classes\CutManager.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\CutManager.exe,0"; Tasks: associatefiles
+Root: HKCU; Subkey: "Software\Classes\CutManager.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\CutManager.exe"" ""%1"""; Tasks: associatefiles
+; CSV は Excel などの既定を奪わず、「プログラムから開く」の候補にだけ載せる。
+Root: HKCU; Subkey: "Software\Classes\.csv\OpenWithProgids"; ValueType: string; ValueName: "CutManager.Project"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associatefiles
+Root: HKCU; Subkey: "Software\Classes\Applications\CutManager.exe\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\CutManager.exe"" ""%1"""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\CutManager.exe\SupportedTypes"; ValueType: string; ValueName: ".cutmgr"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\Applications\CutManager.exe\SupportedTypes"; ValueType: string; ValueName: ".csv"; ValueData: ""; Flags: uninsdeletevalue
 
 [Run]
 ; skipifsilent は付けない: アプリ内更新は /SILENT で起動するため、

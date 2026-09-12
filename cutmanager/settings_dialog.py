@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QKeySequenceEdit,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -24,6 +25,8 @@ class SettingsDialog(QDialog):
         undo_limit: int,
         shortcuts: dict[str, list[str]] | None = None,
         parent=None,
+        *,
+        display_name: str = "",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("環境設定")
@@ -34,8 +37,15 @@ class SettingsDialog(QDialog):
         self.undo_limit_spin.setValue(max(10, int(undo_limit)))
         self.undo_limit_spin.setSuffix(" 回")
 
+        # 共同編集で他の参加者に見せる名前。
+        self.display_name_edit = QLineEdit(self)
+        self.display_name_edit.setText(display_name)
+        self.display_name_edit.setMaxLength(32)
+        self.display_name_edit.setPlaceholderText("共同編集で表示される名前")
+
         form_layout = QFormLayout()
         form_layout.addRow("アンドゥ履歴数", self.undo_limit_spin)
+        form_layout.addRow("共同編集の表示名", self.display_name_edit)
 
         shortcut_values = shortcuts or {}
         shortcut_group = self._build_shortcut_group(shortcut_values)
@@ -93,6 +103,9 @@ class SettingsDialog(QDialog):
 
     def undo_limit(self) -> int:
         return self.undo_limit_spin.value()
+
+    def display_name(self) -> str:
+        return self.display_name_edit.text().strip()
 
     def shortcuts(self) -> dict[str, list[str]]:
         result: dict[str, list[str]] = {}

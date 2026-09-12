@@ -254,6 +254,43 @@ class CutTableModel(QAbstractTableModel):
 
         return len(prepared_changes)
 
+    def apply_remote_cell_changes(self, changes: list[tuple[int, int, str]]) -> int:
+        """共同編集で受信したセル変更を、履歴に積まずに反映する。
+
+        取り消し履歴は各自のローカル操作のためのものなので、他者の変更は
+        Undo 対象にしない。素材状態の連動処理も送信側で済んでいるため行わない。
+        """
+
+        prepared: list[CellChange] = []
+        seen: set[tuple[int, int]] = set()
+        for row, column, value in changes:
+            if not 0 <= column < len(CSV_HEADERS) or column in NON_DATA_COLUMNS:
+                continue
+            if not 0 <= row < len(self._rows):
+                continue
+            key = (row, column)
+            if key in seen:
+                continue
+            seen.add(key)
+            new_value = "" if value is None else str(value)
+            old_value = self._rows[row][column]
+            if old_value == new_value:
+                continue
+            prepared.append(CellChange(row=row, column=column, old_value=old_value, new_value=new_value))
+
+        if not prepared:
+            return 0
+
+        self._apply_cell_changes_internal(prepared, use_new_values=True)
+        self.set_modified(True)
+        return len(prepared)
+
+    def apply_remote_rows(self, rows: list[list[str]]) -> None:
+        """共同編集で受信した行構成を、履歴に積まずに反映する。"""
+
+        self._replace_rows_internal([self._normalize_row(row) for row in rows])
+        self.set_modified(True)
+
     def rows(self) -> list[list[str]]:
         return [row.copy() for row in self._rows]
 

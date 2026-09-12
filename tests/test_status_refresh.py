@@ -6,8 +6,15 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+
+# 実際のユーザー設定（前回開いたファイルや共同編集の設定）を読み書きしないよう、
+# PySide6 を読み込む前に設定の保存先を切り替える。
+_settings_dir = tempfile.TemporaryDirectory()
+os.environ["XDG_CONFIG_HOME"] = _settings_dir.name
+os.environ["APPDATA"] = _settings_dir.name
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
@@ -22,23 +29,10 @@ from cutmanager.constants import (
 from cutmanager.csv_io import save_csv_file
 
 
-_settings_dir: tempfile.TemporaryDirectory | None = None
-
-
 def _app() -> QApplication:
-    global _settings_dir
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    if _settings_dir is None:
-        # 実際のユーザー設定（前回開いたファイルなど）を読まないよう隔離する。
-        _settings_dir = tempfile.TemporaryDirectory()
-        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-        QSettings.setPath(
-            QSettings.Format.IniFormat,
-            QSettings.Scope.UserScope,
-            _settings_dir.name,
-        )
     return app
 
 
@@ -61,6 +55,11 @@ class StatusRefreshTest(unittest.TestCase):
             self.path,
             [_row("001", "2026/01/01"), _row("002"), _row("003", status="欠番")],
         )
+        # 共同編集は既定で有効。表示名を先に入れて、初回の名前入力を出さない。
+        settings = QSettings("CutManager", "CutManager")
+        settings.setValue("collab/displayName", "テスト担当")
+        settings.sync()
+
         self.window = MainWindow()
         self.window.open_csv_path(self.path)
         self.app.processEvents()

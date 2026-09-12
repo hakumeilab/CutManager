@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -251,6 +252,7 @@ class MainWindow(QMainWindow):
     COLUMN_VISIBILITY_KEY = "hiddenColumns"
     COLLAB_DISPLAY_NAME_KEY = "collab/displayName"
     COLLAB_ENABLED_KEY = "collab/enabled"
+    COLLAB_NAME_ASKED_KEY = "collab/displayNameAsked"
     # 変更の配信と自動保存をまとめるための待ち時間。連続入力で書き込みが暴れないようにする。
     COLLAB_PUBLISH_DELAY_MS = 400
     COLLAB_AUTOSAVE_DELAY_MS = 3000
@@ -295,6 +297,7 @@ class MainWindow(QMainWindow):
 
         self.collab = CollabSession(self)
         self._applying_remote_change = False
+        self._had_collab_peers = False
         self._collab_publish_timer = QTimer(self)
         self._collab_publish_timer.setSingleShot(True)
         self._collab_publish_timer.setInterval(self.COLLAB_PUBLISH_DELAY_MS)
@@ -350,6 +353,7 @@ class MainWindow(QMainWindow):
         self.preferences_action: QAction
         self.restore_default_sort_action: QAction
         self.collab_action: QAction
+        self.collab_name_action: QAction
         self.check_updates_action: QAction
         self.license_info_action: QAction
 
@@ -418,12 +422,15 @@ class MainWindow(QMainWindow):
         self.restore_default_sort_action.setEnabled(False)
         self.restore_default_sort_action.triggered.connect(self._restore_default_sort)
 
-        self.collab_action = QAction("共同編集を開始", self)
+        self.collab_action = QAction("共同編集を使う", self)
         self.collab_action.setCheckable(True)
         self.collab_action.setToolTip(
-            "同じ NAS 上のファイルを開いている人と、編集内容と選択セルをリアルタイムで共有します。"
+            "同じファイルを誰かが開いたら、編集内容と選択セルの共有を自動で始めます。"
         )
         self.collab_action.toggled.connect(self.toggle_collaboration)
+
+        self.collab_name_action = QAction("共同編集の表示名を変更…", self)
+        self.collab_name_action.triggered.connect(lambda: self._ask_collab_display_name())
 
         self.check_updates_action = QAction("更新を確認", self)
         self.check_updates_action.triggered.connect(self.check_for_updates)
@@ -572,6 +579,7 @@ class MainWindow(QMainWindow):
         self.file_menu.addAction(self.save_as_action)
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.collab_action)
+        self.file_menu.addAction(self.collab_name_action)
 
         self.edit_menu.clear()
         self.edit_menu.addAction(self.undo_action)
@@ -1517,44 +1525,59 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 共同編集
 
     def toggle_collaboration(self, enabled: bool) -> None:
-        if not enabled:
+        """メニューの「共同編集を使う」の切り替え。"""
+
+        self.settings.setValue(self.COLLAB_ENABLED_KEY, bool(enabled))
+        self.settings.sync()
+        if enabled:
+            self._start_collaboration(interactive=True)
+        else:
             self._stop_collaboration()
-            return
+
+    def _collaboration_enabled(self) -> bool:
+        # 既定は有効。同じファイルを誰かが開いた時点で自動的に共有が始まる。
+        return str(self.settings.value(self.COLLAB_ENABLED_KEY, "true")).lower() in ("true", "1")
+
+    def _start_collaboration(self, *, interactive: bool) -> bool:
+        """開いているファイルで共有への参加を始める。
+
+        相手がいなくても参加しておき、誰かが同じファイルを開いた時点で
+        自動的に共有が始まるようにする。
+        """
 
         if not self.current_file_path:
-            QMessageBox.information(
-                self,
-                "共同編集",
-                "共同編集を始める前に、NAS 上の共有フォルダーへファイルを保存してください。",
-            )
-            self._set_collab_action_checked(False)
-            return
+            if interactive:
+                QMessageBox.information(
+                    self,
+                    "共同編集",
+                    "共同編集を使うには、先にファイルを保存してください。\n"
+                    "NAS の共有フォルダーに置くと、ほかの人と同時に編集できます。",
+                )
+            return False
 
         if not self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows()):
-            self._set_collab_action_checked(False)
-            return
+            return False
 
-        self.settings.setValue(self.COLLAB_ENABLED_KEY, True)
-        self.settings.sync()
-        self._set_collab_action_checked(True)
-        self.collab_action.setText("共同編集を終了")
         self._publish_local_cursor()
         self._update_collab_label()
+        # 起動直後でも画面が出てから尋ねるように、次のイベントループへ回す。
+        QTimer.singleShot(0, self._ensure_collab_display_name)
+        return True
 
     def _stop_collaboration(self, *, remember: bool = True) -> None:
         self._collab_publish_timer.stop()
         self._collab_autosave_timer.stop()
-        was_active = self.collab.is_active()
+        was_sharing = self._is_sharing_with_others()
         self.collab.stop()
         if remember:
             self.settings.setValue(self.COLLAB_ENABLED_KEY, False)
             self.settings.sync()
-        self._set_collab_action_checked(False)
-        self.collab_action.setText("共同編集を開始")
         self.table_view.set_remote_cursors([])
+        self._had_collab_peers = False
         self._update_collab_label()
-        if was_active and self.model.is_modified() and self.current_file_path:
-            self._collab_autosave()
+        if was_sharing and self.model.is_modified() and self.current_file_path:
+            # 共有していた分は、抜ける前にファイルへ書き出しておく。
+            self._save_shared_file()
 
     def _set_collab_action_checked(self, checked: bool) -> None:
         # toggled が再入しないようブロックしてからチェック状態を合わせる。
@@ -1563,44 +1586,80 @@ class MainWindow(QMainWindow):
         self.collab_action.blockSignals(was_blocked)
 
     def _restore_collaboration(self) -> None:
-        """前回終了時に共同編集を使っていたら、復元したファイルで再開する。"""
+        """起動時の共同編集の状態を整える。"""
 
-        if not self.current_file_path:
-            return
-        if str(self.settings.value(self.COLLAB_ENABLED_KEY, "false")).lower() not in ("true", "1"):
-            return
-        self.collab_action.setChecked(True)
+        enabled = self._collaboration_enabled()
+        self._set_collab_action_checked(enabled)
+        if enabled:
+            self._start_collaboration(interactive=False)
 
     def _sync_collaboration_with_current_file(self) -> None:
-        """開いているファイルが変わったら、共同編集の対象も追従させる。"""
+        """開いているファイルが変わったら、共有の対象も追従させる。"""
 
-        if not self.collab.is_active():
+        if not self._collaboration_enabled():
             return
         if not self.current_file_path:
-            self._stop_collaboration(remember=False)
+            if self.collab.is_active():
+                self._stop_collaboration(remember=False)
             return
-        if self.collab.file_path() == self.current_file_path:
+        if self.collab.is_active() and self.collab.file_path() == self.current_file_path:
             return
-        self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows())
-        self._publish_local_cursor()
-        self._update_collab_label()
+        self._start_collaboration(interactive=False)
 
     def _collab_display_name(self) -> str:
-        stored = str(self.settings.value(self.COLLAB_DISPLAY_NAME_KEY, "") or "").strip()
-        if stored:
-            return stored
-        return self._default_display_name()
+        """共同編集で相手に見せる名前。未設定なら空文字。"""
 
-    @staticmethod
-    def _default_display_name() -> str:
-        for variable in ("USERNAME", "USER", "LOGNAME"):
-            value = os.environ.get(variable, "").strip()
-            if value:
-                return value
-        return "名無し"
+        return str(self.settings.value(self.COLLAB_DISPLAY_NAME_KEY, "") or "").strip()
+
+    def _collab_display_name_or_placeholder(self) -> str:
+        return self._collab_display_name() or "名前未設定"
+
+    def _set_collab_display_name(self, display_name: str) -> None:
+        self.settings.setValue(self.COLLAB_DISPLAY_NAME_KEY, display_name.strip())
+        self.settings.sync()
+        if self.collab.is_active():
+            # 在席情報に載る名前なので、開き直して相手の画面へ反映する。
+            self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows())
+            self._publish_local_cursor()
+        self._update_collab_label()
+
+    def _ask_collab_display_name(self, *, prompt_reason: str = "") -> None:
+        """共同編集で使う名前を本人に入力してもらう。"""
+
+        message = "共同編集で相手に表示される名前を入力してください。"
+        if prompt_reason:
+            message = f"{prompt_reason}\n{message}"
+        display_name, accepted = QInputDialog.getText(
+            self,
+            "共同編集の表示名",
+            message,
+            text=self._collab_display_name(),
+        )
+        self.settings.setValue(self.COLLAB_NAME_ASKED_KEY, True)
+        self.settings.sync()
+        if not accepted:
+            return
+        self._set_collab_display_name(display_name)
+
+    def _ensure_collab_display_name(self) -> None:
+        """名前が未設定なら一度だけ尋ねる（断られたら以後は自動で尋ねない）。"""
+
+        if self._collab_display_name():
+            return
+        if str(self.settings.value(self.COLLAB_NAME_ASKED_KEY, "false")).lower() in ("true", "1"):
+            return
+        self._ask_collab_display_name(prompt_reason="共同編集を開始しました。")
+
+    def _is_sharing_with_others(self) -> bool:
+        return self.collab.is_active() and bool(self.collab.peers())
 
     def _schedule_collab_publish(self) -> None:
-        if not self.collab.is_active() or self._applying_remote_change:
+        # 相手がいない間は配信も自動保存もしない。単独で編集しているときに
+        # 共有フォルダーへ書きに行かないようにするため。
+        # 溜まった変更は、相手が現れた時点でまとめて配信する（下記
+        # _on_collab_peers_changed）。配信の基準は参加時のファイル内容のままなので、
+        # 相手がいない間の編集も取りこぼさない。
+        if not self._is_sharing_with_others() or self._applying_remote_change:
             return
         self._collab_publish_timer.start()
         self._collab_autosave_timer.start()
@@ -1682,7 +1741,19 @@ class MainWindow(QMainWindow):
                 return index
         return None
 
-    def _on_collab_peers_changed(self, _peers) -> None:
+    def _on_collab_peers_changed(self, peers) -> None:
+        had_peers = self._had_collab_peers
+        self._had_collab_peers = bool(peers)
+
+        if peers and not had_peers:
+            # 誰かが同じファイルを開いた。ここまでの編集をまとめて送り、共有を始める。
+            self._publish_local_changes()
+            self._collab_autosave_timer.start()
+            names = "、".join(peer.name for peer in peers)
+            self.statusBar().showMessage(f"{names} と共同編集を始めました。", 5000)
+        elif not peers and had_peers:
+            self.statusBar().showMessage("共同編集の相手がいなくなりました。", 4000)
+
         self._update_collab_label()
         self._refresh_remote_cursors()
 
@@ -1724,16 +1795,25 @@ class MainWindow(QMainWindow):
             self.collab_label.setToolTip("")
             return
 
+        display_name = self._collab_display_name_or_placeholder()
         peers = self.collab.peers()
         if peers:
             names = "、".join(peer.name for peer in peers)
-            self.collab_label.setText(f"共同編集: {self._collab_display_name()} + {len(peers)} 人")
+            self.collab_label.setText(f"共同編集: {display_name} + {len(peers)} 人")
             self.collab_label.setToolTip(f"参加者: {names}")
         else:
-            self.collab_label.setText(f"共同編集: {self._collab_display_name()}（自分のみ）")
-            self.collab_label.setToolTip("")
+            self.collab_label.setText(f"共同編集: {display_name}（自分のみ）")
+            self.collab_label.setToolTip("待機中です。同じファイルを誰かが開くと自動で共有を始めます。")
 
     def _collab_autosave(self) -> None:
+        # 自動保存は共有中だけ。単独で使うときの保存の挙動は今までどおりにする。
+        if not self._is_sharing_with_others():
+            return
+        if not self.current_file_path or not self.model.is_modified():
+            return
+        self._save_shared_file()
+
+    def _save_shared_file(self) -> None:
         if not self.current_file_path or not self.model.is_modified():
             return
         try:
@@ -1762,13 +1842,7 @@ class MainWindow(QMainWindow):
         self._save_undo_limit(new_limit)
         self.shortcut_manager.update(dialog.shortcuts())
         self._apply_shortcuts()
-        self.settings.setValue(self.COLLAB_DISPLAY_NAME_KEY, dialog.display_name())
-        self.settings.sync()
-        if self.collab.is_active():
-            # 表示名は在席情報に載るので、開き直して他の参加者へ反映する。
-            self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows())
-            self._publish_local_cursor()
-        self._update_collab_label()
+        self._set_collab_display_name(dialog.display_name())
         self.statusBar().showMessage(f"アンドゥ履歴数を {new_limit} 回に設定しました。", 4000)
 
     def check_for_updates(self) -> None:

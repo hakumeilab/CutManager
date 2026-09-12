@@ -672,6 +672,86 @@ class CutTableView(QTableView):
         self.viewport().setAcceptDrops(True)
         self.viewport().installEventFilter(self)
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        # 共同編集の相手が選択しているセル。(行, 列, 表示名, 色) の並び。
+        self._remote_cursors: list[tuple[int, int, str, str]] = []
+
+    def set_remote_cursors(self, cursors: list[tuple[int, int, str, str]]) -> None:
+        """他の参加者の選択セルを設定する。行・列はプロキシモデル上の位置。"""
+
+        normalized = [
+            (int(row), int(column), str(name), str(color))
+            for row, column, name, color in cursors
+        ]
+        if normalized == self._remote_cursors:
+            return
+        self._remote_cursors = normalized
+        self.viewport().update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._remote_cursors:
+            self._paint_remote_cursors()
+
+    def _paint_remote_cursors(self) -> None:
+        model = self.model()
+        if model is None:
+            return
+
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        try:
+            for row, column, name, color_name in self._remote_cursors:
+                if not 0 <= row < model.rowCount() or not 0 <= column < model.columnCount():
+                    continue
+                if self.isRowHidden(row) or self.isColumnHidden(column):
+                    continue
+                rect = self.visualRect(model.index(row, column))
+                if rect.isEmpty() or not rect.intersects(self.viewport().rect()):
+                    continue
+                color = QColor(color_name)
+                if not color.isValid():
+                    continue
+                self._paint_remote_cursor_frame(painter, rect, color)
+                self._paint_remote_cursor_label(painter, rect, color, name)
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _paint_remote_cursor_frame(painter: QPainter, rect: QRect, color: QColor) -> None:
+        fill = QColor(color)
+        fill.setAlpha(28)
+        painter.fillRect(rect.adjusted(1, 1, -1, -1), fill)
+        pen = QPen(color)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect.adjusted(1, 1, -2, -2))
+
+    def _paint_remote_cursor_label(self, painter: QPainter, rect: QRect, color: QColor, name: str) -> None:
+        if not name:
+            return
+
+        metrics = painter.fontMetrics()
+        text = metrics.elidedText(name, Qt.TextElideMode.ElideRight, 120)
+        label_width = metrics.horizontalAdvance(text) + 10
+        label_height = metrics.height() + 2
+        top = rect.top() - label_height
+        if top < self.viewport().rect().top():
+            # 上に出す余白が無いときはセルの下に回す。
+            top = rect.bottom()
+        left = min(rect.left(), self.viewport().rect().right() - label_width)
+        label_rect = QRect(max(0, left), top, label_width, label_height)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(label_rect, 3, 3)
+        painter.setPen(QPen(self._label_text_color(color)))
+        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    @staticmethod
+    def _label_text_color(color: QColor) -> QColor:
+        luminance = (0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()) / 255
+        return QColor("#101010") if luminance > 0.6 else QColor("#ffffff")
 
     def eventFilter(self, source, event) -> bool:
         if source is self.viewport():

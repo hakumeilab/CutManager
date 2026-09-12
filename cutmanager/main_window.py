@@ -73,6 +73,7 @@ from .constants import (
     WINDOW_SIZE,
     WINDOW_TITLE,
 )
+from .collab import CollabSession, apply_diff, row_key
 from .csv_io import CsvLoadError, load_csv_file, save_csv_file
 from .filter_popup import ColumnFilterPopup
 from .folder_import import apply_material_updates, build_rows_from_dropped_folders
@@ -245,6 +246,11 @@ class MainWindow(QMainWindow):
     EPISODE_MEMO_PREFIX = "episodeMemo/"
     HEADER_STATE_KEY = "tableHeaderState"
     COLUMN_VISIBILITY_KEY = "hiddenColumns"
+    COLLAB_DISPLAY_NAME_KEY = "collab/displayName"
+    COLLAB_ENABLED_KEY = "collab/enabled"
+    # 変更の配信と自動保存をまとめるための待ち時間。連続入力で書き込みが暴れないようにする。
+    COLLAB_PUBLISH_DELAY_MS = 400
+    COLLAB_AUTOSAVE_DELAY_MS = 3000
     DEFAULT_UNDO_LIMIT = 100
 
     def __init__(self) -> None:
@@ -278,12 +284,24 @@ class MainWindow(QMainWindow):
         self.proxy_model = CutFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
 
+        self.collab = CollabSession(self)
+        self._applying_remote_change = False
+        self._collab_publish_timer = QTimer(self)
+        self._collab_publish_timer.setSingleShot(True)
+        self._collab_publish_timer.setInterval(self.COLLAB_PUBLISH_DELAY_MS)
+        self._collab_publish_timer.timeout.connect(self._publish_local_changes)
+        self._collab_autosave_timer = QTimer(self)
+        self._collab_autosave_timer.setSingleShot(True)
+        self._collab_autosave_timer.setInterval(self.COLLAB_AUTOSAVE_DELAY_MS)
+        self._collab_autosave_timer.timeout.connect(self._collab_autosave)
+
         self.table_view = CutTableView(self)
         self.drop_hint_label = QLabel(self)
         self.file_path_label = QLabel(self)
         self.row_count_label = QLabel(self)
         self.modified_label = QLabel(self)
         self.drop_result_label = QLabel(self)
+        self.collab_label = QLabel(self)
         self.summary_labels: dict[str, QLabel] = {}
         self.summary_ribbon_clip: QWidget | None = None
         self.summary_ribbon_body: QWidget | None = None
@@ -322,6 +340,7 @@ class MainWindow(QMainWindow):
         self.regenerate_thumbnails_action: QAction
         self.preferences_action: QAction
         self.restore_default_sort_action: QAction
+        self.collab_action: QAction
         self.check_updates_action: QAction
         self.license_info_action: QAction
 
@@ -334,6 +353,7 @@ class MainWindow(QMainWindow):
         self._connect_theme_signals()
         self._update_all_status()
         self._restore_last_session_file()
+        self._restore_collaboration()
 
     def _create_actions(self) -> None:
         self.new_action = QAction("新規作成", self)
@@ -387,6 +407,13 @@ class MainWindow(QMainWindow):
         self.restore_default_sort_action = QAction("カット番号順に戻す", self)
         self.restore_default_sort_action.setEnabled(False)
         self.restore_default_sort_action.triggered.connect(self._restore_default_sort)
+
+        self.collab_action = QAction("共同編集を開始", self)
+        self.collab_action.setCheckable(True)
+        self.collab_action.setToolTip(
+            "同じ NAS 上のファイルを開いている人と、編集内容と選択セルをリアルタイムで共有します。"
+        )
+        self.collab_action.toggled.connect(self.toggle_collaboration)
 
         self.check_updates_action = QAction("更新を確認", self)
         self.check_updates_action.triggered.connect(self.check_for_updates)
@@ -507,6 +534,8 @@ class MainWindow(QMainWindow):
         self.row_count_label.setObjectName("statusMeta")
         self.modified_label.setObjectName("statusMeta")
         self.drop_result_label.setObjectName("statusMeta")
+        self.collab_label.setObjectName("statusMeta")
+        self.collab_label.setText("共同編集: オフ")
 
         status_bar = QStatusBar(self)
         status_bar.addPermanentWidget(self.file_path_label, 2)
@@ -514,6 +543,7 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self.modified_label)
         status_bar.addPermanentWidget(self.drop_progress_bar)
         status_bar.addPermanentWidget(self.drop_result_label, 2)
+        status_bar.addPermanentWidget(self.collab_label)
         status_bar.addPermanentWidget(self.thumbnail_status_label)
         status_bar.addPermanentWidget(self.thumbnail_progress_bar)
         self.setStatusBar(status_bar)
@@ -530,6 +560,8 @@ class MainWindow(QMainWindow):
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.save_action)
         self.file_menu.addAction(self.save_as_action)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.collab_action)
 
         self.edit_menu.clear()
         self.edit_menu.addAction(self.undo_action)
@@ -610,6 +642,18 @@ class MainWindow(QMainWindow):
         self.proxy_model.rowsRemoved.connect(lambda *_: self._update_all_status())
         self.history.canUndoChanged.connect(self.undo_action.setEnabled)
         self.history.canRedoChanged.connect(self.redo_action.setEnabled)
+
+        self.model.contentChanged.connect(lambda *_: self._schedule_collab_publish())
+        self.model.actualRowCountChanged.connect(lambda *_: self._schedule_collab_publish())
+        self.model.modelReset.connect(self._refresh_remote_cursors)
+        self.proxy_model.layoutChanged.connect(self._refresh_remote_cursors)
+        selection_model = self.table_view.selectionModel()
+        if selection_model is not None:
+            selection_model.currentChanged.connect(self._publish_local_cursor)
+        self.collab.remoteDiffReceived.connect(self._apply_remote_diff)
+        self.collab.peersChanged.connect(self._on_collab_peers_changed)
+        self.collab.statusChanged.connect(lambda message: self.statusBar().showMessage(message, 4000))
+        self.collab.failed.connect(self._on_collab_failed)
 
     def _connect_theme_signals(self) -> None:
         app = QApplication.instance()
@@ -1442,11 +1486,237 @@ class MainWindow(QMainWindow):
             lines.pop()
         return [line.split("\t") for line in lines] if lines else []
 
+    # ------------------------------------------------------------ 共同編集
+
+    def toggle_collaboration(self, enabled: bool) -> None:
+        if not enabled:
+            self._stop_collaboration()
+            return
+
+        if not self.current_file_path:
+            QMessageBox.information(
+                self,
+                "共同編集",
+                "共同編集を始める前に、NAS 上の共有フォルダーへファイルを保存してください。",
+            )
+            self._set_collab_action_checked(False)
+            return
+
+        if not self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows()):
+            self._set_collab_action_checked(False)
+            return
+
+        self.settings.setValue(self.COLLAB_ENABLED_KEY, True)
+        self.settings.sync()
+        self._set_collab_action_checked(True)
+        self.collab_action.setText("共同編集を終了")
+        self._publish_local_cursor()
+        self._update_collab_label()
+
+    def _stop_collaboration(self, *, remember: bool = True) -> None:
+        self._collab_publish_timer.stop()
+        self._collab_autosave_timer.stop()
+        was_active = self.collab.is_active()
+        self.collab.stop()
+        if remember:
+            self.settings.setValue(self.COLLAB_ENABLED_KEY, False)
+            self.settings.sync()
+        self._set_collab_action_checked(False)
+        self.collab_action.setText("共同編集を開始")
+        self.table_view.set_remote_cursors([])
+        self._update_collab_label()
+        if was_active and self.model.is_modified() and self.current_file_path:
+            self._collab_autosave()
+
+    def _set_collab_action_checked(self, checked: bool) -> None:
+        # toggled が再入しないようブロックしてからチェック状態を合わせる。
+        was_blocked = self.collab_action.blockSignals(True)
+        self.collab_action.setChecked(checked)
+        self.collab_action.blockSignals(was_blocked)
+
+    def _restore_collaboration(self) -> None:
+        """前回終了時に共同編集を使っていたら、復元したファイルで再開する。"""
+
+        if not self.current_file_path:
+            return
+        if str(self.settings.value(self.COLLAB_ENABLED_KEY, "false")).lower() not in ("true", "1"):
+            return
+        self.collab_action.setChecked(True)
+
+    def _sync_collaboration_with_current_file(self) -> None:
+        """開いているファイルが変わったら、共同編集の対象も追従させる。"""
+
+        if not self.collab.is_active():
+            return
+        if not self.current_file_path:
+            self._stop_collaboration(remember=False)
+            return
+        if self.collab.file_path() == self.current_file_path:
+            return
+        self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows())
+        self._publish_local_cursor()
+        self._update_collab_label()
+
+    def _collab_display_name(self) -> str:
+        stored = str(self.settings.value(self.COLLAB_DISPLAY_NAME_KEY, "") or "").strip()
+        if stored:
+            return stored
+        return self._default_display_name()
+
+    @staticmethod
+    def _default_display_name() -> str:
+        for variable in ("USERNAME", "USER", "LOGNAME"):
+            value = os.environ.get(variable, "").strip()
+            if value:
+                return value
+        return "名無し"
+
+    def _schedule_collab_publish(self) -> None:
+        if not self.collab.is_active() or self._applying_remote_change:
+            return
+        self._collab_publish_timer.start()
+        self._collab_autosave_timer.start()
+
+    def _publish_local_changes(self) -> None:
+        if not self.collab.is_active():
+            return
+        self.collab.publish_rows(self.model.rows())
+
+    def _publish_local_cursor(self, *_args) -> None:
+        if not self.collab.is_active():
+            return
+        current_index = self.table_view.currentIndex()
+        if not current_index.isValid():
+            self.collab.publish_cursor("", "", -1)
+            return
+        source_index = self.proxy_model.mapToSource(current_index)
+        if not source_index.isValid():
+            self.collab.publish_cursor("", "", -1)
+            return
+        rows = self.model.rows()
+        if not 0 <= source_index.row() < len(rows):
+            self.collab.publish_cursor("", "", -1)
+            return
+        key = row_key(rows[source_index.row()])
+        if key is None:
+            self.collab.publish_cursor("", "", -1)
+            return
+        self.collab.publish_cursor(key[0], key[1], source_index.column())
+
+    def _apply_remote_diff(self, diff) -> None:
+        new_rows, cell_updates, structural = apply_diff(self.model.rows(), diff)
+
+        self._applying_remote_change = True
+        try:
+            if structural:
+                selected_key, selected_column = self._current_cell_key()
+                self.model.apply_remote_rows(new_rows)
+                # 受信した行は末尾に積まれるので、表示中の並び順に入れ直す。
+                self._apply_sort(self._sort_column, self._sort_order, mark_modified=False)
+                self._restore_cell_selection(selected_key, selected_column)
+            elif cell_updates:
+                self.model.apply_remote_cell_changes(cell_updates)
+            else:
+                return
+        finally:
+            self._applying_remote_change = False
+
+        # 取り込んだ内容は配信済みの状態なので、送り返さないよう基準を更新する。
+        self.collab.adopt_rows(self.model.rows())
+        self._refresh_remote_cursors()
+        self._collab_autosave_timer.start()
+
+    def _current_cell_key(self) -> tuple[tuple[str, str] | None, int]:
+        current_index = self.table_view.currentIndex()
+        if not current_index.isValid():
+            return None, -1
+        source_index = self.proxy_model.mapToSource(current_index)
+        rows = self.model.rows()
+        if not source_index.isValid() or not 0 <= source_index.row() < len(rows):
+            return None, -1
+        return row_key(rows[source_index.row()]), source_index.column()
+
+    def _restore_cell_selection(self, key: tuple[str, str] | None, column: int) -> None:
+        if key is None or column < 0:
+            return
+        source_row = self._source_row_for_key(key)
+        if source_row is None:
+            return
+        target_index = self.proxy_model.mapFromSource(self.model.index(source_row, column))
+        if target_index.isValid():
+            self.table_view.setCurrentIndex(target_index)
+
+    def _source_row_for_key(self, key: tuple[str, str]) -> int | None:
+        for index, row in enumerate(self.model.rows()):
+            if row_key(row) == key:
+                return index
+        return None
+
+    def _on_collab_peers_changed(self, _peers) -> None:
+        self._update_collab_label()
+        self._refresh_remote_cursors()
+
+    def _refresh_remote_cursors(self) -> None:
+        if not self.collab.is_active():
+            self.table_view.set_remote_cursors([])
+            return
+
+        row_by_key: dict[tuple[str, str], int] = {}
+        for index, row in enumerate(self.model.rows()):
+            key = row_key(row)
+            if key is not None and key not in row_by_key:
+                row_by_key[key] = index
+
+        cursors: list[tuple[int, int, str, str]] = []
+        for peer in self.collab.peers():
+            key = peer.row_key
+            if key is None or peer.column < 0:
+                continue
+            source_row = row_by_key.get(key)
+            if source_row is None:
+                continue
+            proxy_index = self.proxy_model.mapFromSource(self.model.index(source_row, peer.column))
+            if not proxy_index.isValid():
+                continue
+            cursors.append((proxy_index.row(), proxy_index.column(), peer.name, peer.color))
+
+        self.table_view.set_remote_cursors(cursors)
+
+    def _update_collab_label(self) -> None:
+        if not self.collab.is_active():
+            self.collab_label.setText("共同編集: オフ")
+            self.collab_label.setToolTip("")
+            return
+
+        peers = self.collab.peers()
+        if peers:
+            names = "、".join(peer.name for peer in peers)
+            self.collab_label.setText(f"共同編集: {self._collab_display_name()} + {len(peers)} 人")
+            self.collab_label.setToolTip(f"参加者: {names}")
+        else:
+            self.collab_label.setText(f"共同編集: {self._collab_display_name()}（自分のみ）")
+            self.collab_label.setToolTip("")
+
+    def _collab_autosave(self) -> None:
+        if not self.current_file_path or not self.model.is_modified():
+            return
+        try:
+            save_csv_file(self.current_file_path, self.model.rows())
+        except CsvLoadError as exc:
+            self.statusBar().showMessage(f"自動保存に失敗しました: {exc}", 6000)
+            return
+        self.history.set_clean()
+        self._update_all_status()
+
+    def _on_collab_failed(self, message: str) -> None:
+        self.statusBar().showMessage(message, 6000)
+
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(
             self.history.limit,
             self.shortcut_manager.all_sequences(),
             self,
+            display_name=self._collab_display_name(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1456,6 +1726,13 @@ class MainWindow(QMainWindow):
         self._save_undo_limit(new_limit)
         self.shortcut_manager.update(dialog.shortcuts())
         self._apply_shortcuts()
+        self.settings.setValue(self.COLLAB_DISPLAY_NAME_KEY, dialog.display_name())
+        self.settings.sync()
+        if self.collab.is_active():
+            # 表示名は在席情報に載るので、開き直して他の参加者へ反映する。
+            self.collab.start(self.current_file_path, self._collab_display_name(), self.model.rows())
+            self._publish_local_cursor()
+        self._update_collab_label()
         self.statusBar().showMessage(f"アンドゥ履歴数を {new_limit} 回に設定しました。", 4000)
 
     def check_for_updates(self) -> None:
@@ -1967,9 +2244,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._skip_close_confirmation:
+            self._stop_collaboration(remember=False)
             event.accept()
             return
         if self._confirm_discard_or_save():
+            self._stop_collaboration(remember=False)
             event.accept()
             return
         event.ignore()
@@ -2429,6 +2708,7 @@ class MainWindow(QMainWindow):
         else:
             self._clear_last_session_file()
         self.settings.sync()
+        self._sync_collaboration_with_current_file()
 
     def _clear_last_session_file(self) -> None:
         self.settings.remove(self.LAST_SESSION_FILE_KEY)

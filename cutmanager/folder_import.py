@@ -99,8 +99,20 @@ class MaterialRowUpdate:
         return make_cut_key(self.cut_number, self.ab_group)
 
 
+def normalize_cut_number(cut_number: str) -> str:
+    """カット番号を比較用に正規化する（例: "001" と "01" を同一視する）。
+
+    数字のみで構成される場合は先頭のゼロを取り除く。数字以外を含む場合は
+    前後の空白を除いた文字列をそのまま返す。
+    """
+    text = str(cut_number or "").strip()
+    if text.isdecimal():
+        return text.lstrip("0") or "0"
+    return text
+
+
 def make_cut_key(cut_number: str, ab_group: str = "") -> tuple[str, str]:
-    return (str(cut_number or "").strip(), str(ab_group or "").strip().upper())
+    return (normalize_cut_number(cut_number), str(ab_group or "").strip().upper())
 
 
 def extract_cut_number(name: str) -> str | None:

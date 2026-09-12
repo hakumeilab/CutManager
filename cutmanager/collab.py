@@ -254,7 +254,7 @@ class PeerCursor:
     def row_key(self) -> RowKey | None:
         if not self.cut_number:
             return None
-        return (self.cut_number, self.ab_group)
+        return make_cut_key(self.cut_number, self.ab_group)
 
 
 def peer_color(session_id: str) -> str:

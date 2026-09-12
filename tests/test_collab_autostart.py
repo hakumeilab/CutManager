@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication
 from cutmanager.collab import CollabSession
 from cutmanager.constants import COLUMN_CUT_NUMBER, COLUMN_MEMO, CSV_HEADERS
 from cutmanager.csv_io import load_csv_file, save_csv_file
+from cutmanager.folder_import import make_cut_key
 
 
 def _app() -> QApplication:
@@ -114,7 +115,7 @@ class CollabAutoStartTest(unittest.TestCase):
         peer.poll()
 
         self.assertEqual(len(received), 1)
-        self.assertEqual(received[0].cells[("001", "")], {COLUMN_MEMO: "参加前の編集"})
+        self.assertEqual(received[0].cells[make_cut_key("001")], {COLUMN_MEMO: "参加前の編集"})
 
     def test_autosave_runs_while_sharing(self) -> None:
         self._join_peer()

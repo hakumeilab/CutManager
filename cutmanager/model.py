@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import re
+from typing import NamedTuple
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
@@ -38,6 +39,70 @@ SORT_TOKEN_PATTERN = re.compile(r"\d+|\D+")
 STATUS_SHARED = STATUS_OPTIONS[1]
 STATUS_BANK = STATUS_OPTIONS[2]
 STATUS_MISSING = STATUS_OPTIONS[3]
+
+# data() は描画のたびに 1 セルあたり十数回呼ばれる。PySide6 の短縮名
+# （Qt.DisplayRole など）は 1 回の参照に数マイクロ秒かかるため、整数に直して比較する。
+_DISPLAY_ROLE = int(Qt.ItemDataRole.DisplayRole)
+_EDIT_ROLE = int(Qt.ItemDataRole.EditRole)
+_DECORATION_ROLE = int(Qt.ItemDataRole.DecorationRole)
+_BACKGROUND_ROLE = int(Qt.ItemDataRole.BackgroundRole)
+_FOREGROUND_ROLE = int(Qt.ItemDataRole.ForegroundRole)
+_TOOLTIP_ROLE = int(Qt.ItemDataRole.ToolTipRole)
+_HANDLED_DATA_ROLES = frozenset(
+    {_DISPLAY_ROLE, _EDIT_ROLE, _DECORATION_ROLE, _BACKGROUND_ROLE, _FOREGROUND_ROLE}
+)
+_TEXT_ROLES = [_DISPLAY_ROLE, _EDIT_ROLE]
+_COLOR_ROLES = [_BACKGROUND_ROLE, _FOREGROUND_ROLE]
+_TEXT_AND_COLOR_ROLES = _TEXT_ROLES + _COLOR_ROLES
+_DECORATION_ROLES = [_DECORATION_ROLE]
+
+_COLUMN_COUNT = len(CSV_HEADERS)
+_STR_TYPE_SET = {str}
+# これより多くの行が一度に変わったら、行ごとではなく範囲まとめて再描画を通知する。
+_BULK_CHANGE_ROW_THRESHOLD = 32
+
+_READONLY_FLAGS = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+_EDITABLE_FLAGS = _READONLY_FLAGS | Qt.ItemFlag.ItemIsEditable
+_NO_FLAGS = Qt.ItemFlag.NoItemFlags
+
+# 変わると行全体の配色が変わりうる列。
+_ROW_STYLE_COLUMNS = frozenset(
+    {COLUMN_STATUS, COLUMN_TP_LOAD_COUNT, COLUMN_BG_LOAD_COUNT, COLUMN_TP_STATE, COLUMN_BG_STATE}
+)
+# 行の配色とは別に、セル単位で色を上書きする列。
+_SPECIAL_COLOR_COLUMNS = (COLUMN_TP_LOAD_COUNT, COLUMN_TP_STATE, COLUMN_BG_LOAD_COUNT, COLUMN_BG_STATE)
+
+_DARK_ROW_COLORS = (QColor("#0f172a"), QColor("#162033"))
+_LIGHT_ALTERNATE_ROW_COLOR = QColor("#f7faff")
+_DARK_STATUS_ACCENTS = {
+    STATUS_SHARED: QColor("#22c55e"),
+    STATUS_BANK: QColor("#ef4444"),
+    STATUS_MISSING: QColor("#1e3a8a"),
+}
+_LIGHT_STATUS_ACCENTS = {
+    STATUS_SHARED: QColor("#22c55e"),
+    STATUS_BANK: QColor("#ef4444"),
+    STATUS_MISSING: QColor("#64748b"),
+}
+_DARK_STATUS_MIX = {
+    STATUS_SHARED: 0.22,
+    STATUS_BANK: 0.30,
+    STATUS_MISSING: 0.50,
+}
+# TP/BG 状態セルの色。完了側は緑、未完了側はアンバーで塗り分ける。
+_MATERIAL_STATE_ACCENTS = {
+    TP_STATE_CHECKED: QColor("#22c55e"),
+    TP_STATE_UNCHECKED: QColor("#f59e0b"),
+    BG_STATE_APPROVED: QColor("#22c55e"),
+    BG_STATE_RAW: QColor("#f59e0b"),
+}
+
+
+class _RowStyle(NamedTuple):
+    background: QColor | None
+    foreground: QColor | None
+    # 列 → (背景, 文字色)。行の配色より優先する。
+    special: dict[int, tuple[QColor, QColor]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +157,8 @@ class CutTableModel(QAbstractTableModel):
         self._rows = [self._normalize_row(row) for row in (rows or [])]
         self._modified = False
         self._history: HistoryManager | None = None
-        self._row_background_cache: dict[int, QColor | None] = {}
-        self._row_foreground_cache: dict[int, QColor | None] = {}
-        self._special_background_cache: dict[tuple[int, int], QColor | None] = {}
-        self._special_foreground_cache: dict[tuple[int, int], QColor | None] = {}
+        self._row_style_cache: dict[int, _RowStyle] = {}
+        self._palette_context_cache: tuple[QPalette, bool] | None = None
         self._thumbnail_provider = None
         # 動画パス（casefold）→ 行番号リストの索引。サムネイル更新照合を O(1) にする。
         self._video_path_rows: dict[str, list[int]] | None = None
@@ -116,32 +179,39 @@ class CutTableModel(QAbstractTableModel):
             return 0
         return len(CSV_HEADERS)
 
-    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
-        if not index.isValid():
+    def data(self, index: QModelIndex, role: int = _DISPLAY_ROLE):
+        # 描画時はフォントや配置など扱わないロールも問い合わせが来るので、先に弾く。
+        if role not in _HANDLED_DATA_ROLES or not index.isValid():
             return None
 
-        if self._is_virtual_row(index.row()):
-            return "" if role in (Qt.DisplayRole, Qt.EditRole) else None
+        row = index.row()
+        rows = self._rows
+        if row >= len(rows):
+            return "" if role == _DISPLAY_ROLE or role == _EDIT_ROLE else None
 
-        if index.column() == COLUMN_THUMBNAIL:
-            if role == Qt.DecorationRole:
-                return self._thumbnail_for_row(index.row())
-            if role in (Qt.DisplayRole, Qt.EditRole):
+        column = index.column()
+        if role == _DISPLAY_ROLE or role == _EDIT_ROLE:
+            if column == COLUMN_THUMBNAIL:
                 return ""
+            return rows[row][column]
 
-        if role in (Qt.DisplayRole, Qt.EditRole):
-            return self._rows[index.row()][index.column()]
+        if role == _BACKGROUND_ROLE:
+            style = self._row_style(row)
+            special = style.special.get(column)
+            return style.background if special is None else special[0]
 
-        if role == Qt.BackgroundRole:
-            return self._cell_background_color(index.row(), index.column())
+        if role == _FOREGROUND_ROLE:
+            style = self._row_style(row)
+            special = style.special.get(column)
+            return style.foreground if special is None else special[1]
 
-        if role == Qt.ForegroundRole:
-            return self._cell_foreground_color(index.row(), index.column())
+        if role == _DECORATION_ROLE and column == COLUMN_THUMBNAIL:
+            return self._thumbnail_for_row(row)
 
         return None
 
     def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
-        if role != Qt.EditRole or not index.isValid():
+        if role != _EDIT_ROLE or not index.isValid():
             return False
 
         if index.column() in READONLY_COLUMNS:
@@ -156,7 +226,7 @@ class CutTableModel(QAbstractTableModel):
             appended_row = self._blank_row()
             appended_row[index.column()] = text
             new_rows.append(appended_row)
-            self._apply_rows_snapshot(new_rows, modified=True, changed_columns=[index.column()])
+            self._apply_rows_snapshot(new_rows, modified=True, changed_columns=[index.column()], normalized=True)
             return True
 
         current_value = self._rows[index.row()][index.column()]
@@ -167,23 +237,22 @@ class CutTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
-            return Qt.NoItemFlags
-        base_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            return _NO_FLAGS
         if index.column() in READONLY_COLUMNS:
-            return base_flags
-        return base_flags | Qt.ItemIsEditable
+            return _READONLY_FLAGS
+        return _EDITABLE_FLAGS
 
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
-        if orientation == Qt.Horizontal:
-            if role == Qt.DisplayRole:
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = _DISPLAY_ROLE):
+        if orientation == Qt.Orientation.Horizontal:
+            if role == _DISPLAY_ROLE:
                 if 0 <= section < len(CSV_HEADERS):
                     return CSV_HEADERS[section]
                 return None
-            if role == Qt.ToolTipRole:
+            if role == _TOOLTIP_ROLE:
                 return "列見出しをクリックで並べ替え、右端の漏斗ボタンで絞り込みできます。"
             return None
 
-        if role != Qt.DisplayRole:
+        if role != _DISPLAY_ROLE:
             return None
 
         return str(section + 1)
@@ -198,14 +267,14 @@ class CutTableModel(QAbstractTableModel):
     ) -> None:
         normalized_rows = [self._normalize_row(row) for row in rows]
         self._sort_row_list(normalized_rows, sort_column, sort_order)
-        self._apply_rows_snapshot(normalized_rows, modified=modified)
+        self._apply_rows_snapshot(normalized_rows, modified=modified, normalized=True)
 
     def insert_blank_row(self, position: int | None = None) -> QModelIndex:
         actual_count = len(self._rows)
         insert_at = actual_count if position is None else max(0, min(position, actual_count))
         new_rows = list(self._rows)
         new_rows.insert(insert_at, self._blank_row())
-        self._apply_rows_snapshot(new_rows, modified=True)
+        self._apply_rows_snapshot(new_rows, modified=True, normalized=True)
         return self.index(insert_at, 0)
 
     def append_rows(self, rows: list[list[str]]) -> None:
@@ -213,7 +282,7 @@ class CutTableModel(QAbstractTableModel):
             return
         new_rows = list(self._rows)
         new_rows.extend(self._normalize_row(row) for row in rows)
-        self._apply_rows_snapshot(new_rows, modified=True)
+        self._apply_rows_snapshot(new_rows, modified=True, normalized=True)
 
     def remove_rows_by_numbers(self, row_numbers: list[int]) -> int:
         targets = sorted({row for row in row_numbers if 0 <= row < len(self._rows)})
@@ -222,7 +291,7 @@ class CutTableModel(QAbstractTableModel):
 
         target_set = set(targets)
         new_rows = [row for index, row in enumerate(self._rows) if index not in target_set]
-        self._apply_rows_snapshot(new_rows, modified=True)
+        self._apply_rows_snapshot(new_rows, modified=True, normalized=True)
         return len(targets)
 
     def clear_indexes(self, indexes: list[QModelIndex]) -> int:
@@ -337,7 +406,7 @@ class CutTableModel(QAbstractTableModel):
         self.dataChanged.emit(
             top_left,
             bottom_right,
-            [Qt.BackgroundRole, Qt.ForegroundRole],
+            _COLOR_ROLES,
         )
 
     def is_modified(self) -> bool:
@@ -363,8 +432,9 @@ class CutTableModel(QAbstractTableModel):
         *,
         modified: bool,
         changed_columns: list[int] | None = None,
+        normalized: bool = False,
     ) -> None:
-        normalized_rows = [self._normalize_row(row) for row in new_rows]
+        normalized_rows = new_rows if normalized else [self._normalize_row(row) for row in new_rows]
         if modified and self._history is not None:
             self._history.push(RowsSnapshotCommand(self, self._rows, normalized_rows, changed_columns))
             return
@@ -374,7 +444,9 @@ class CutTableModel(QAbstractTableModel):
 
     def _replace_rows_internal(self, rows: list[list[str]], changed_columns: list[int] | None = None) -> None:
         self.beginResetModel()
-        self._rows = [self._normalize_row(row) for row in rows]
+        # 呼び出し元で正規化済み。並べ替えはリストをその場で書き換えるので、
+        # 履歴と共有しないようリストだけ作り直す（行そのものは共有する）。
+        self._rows = list(rows)
         self._clear_color_cache()
         self._video_path_rows = None
         self.endResetModel()
@@ -461,13 +533,7 @@ class CutTableModel(QAbstractTableModel):
             self._rows[change.row][change.column] = value
             changed_cells[change.row].add(change.column)
             changed_columns.add(change.column)
-            if change.column in (
-                COLUMN_STATUS,
-                COLUMN_TP_LOAD_COUNT,
-                COLUMN_BG_LOAD_COUNT,
-                COLUMN_TP_STATE,
-                COLUMN_BG_STATE,
-            ):
+            if change.column in _ROW_STYLE_COLUMNS:
                 rows_requiring_full_repaint.add(change.row)
                 self._clear_row_color_cache(change.row)
 
@@ -477,15 +543,32 @@ class CutTableModel(QAbstractTableModel):
         if COLUMN_VIDEO_PATH in changed_columns:
             self._video_path_rows = None
 
+        if len(changed_cells) > _BULK_CHANGE_ROW_THRESHOLD:
+            # 行ごとに通知すると、プロキシとビューの処理が行数ぶん繰り返されて重い。
+            # 変わった範囲を 1 回で通知し、ビューにはまとめて再描画させる。
+            if rows_requiring_full_repaint:
+                left_column, right_column, roles = 0, _COLUMN_COUNT - 1, _TEXT_AND_COLOR_ROLES
+            else:
+                left_column = min(min(columns) for columns in changed_cells.values())
+                right_column = max(max(columns) for columns in changed_cells.values())
+                roles = _TEXT_ROLES
+            self.dataChanged.emit(
+                self.index(min(changed_cells), left_column),
+                self.index(max(changed_cells), right_column),
+                roles,
+            )
+            self.contentChanged.emit(sorted(changed_columns))
+            return
+
         for row, columns in changed_cells.items():
             if row in rows_requiring_full_repaint:
                 left_column = 0
                 right_column = len(CSV_HEADERS) - 1
-                roles = [Qt.DisplayRole, Qt.EditRole, Qt.BackgroundRole, Qt.ForegroundRole]
+                roles = _TEXT_AND_COLOR_ROLES
             else:
                 left_column = min(columns)
                 right_column = max(columns)
-                roles = [Qt.DisplayRole, Qt.EditRole]
+                roles = _TEXT_ROLES
             self.dataChanged.emit(
                 self.index(row, left_column),
                 self.index(row, right_column),
@@ -522,7 +605,7 @@ class CutTableModel(QAbstractTableModel):
         for row in rows:
             if 0 <= row < len(self._rows):
                 cell = self.index(row, COLUMN_THUMBNAIL)
-                self.dataChanged.emit(cell, cell, [Qt.DecorationRole])
+                self.dataChanged.emit(cell, cell, _DECORATION_ROLES)
 
     def _video_path_row_map(self) -> dict[str, list[int]]:
         if self._video_path_rows is None:
@@ -555,8 +638,8 @@ class CutTableModel(QAbstractTableModel):
     def _is_normalized(values) -> bool:
         return (
             type(values) is list
-            and len(values) == len(CSV_HEADERS)
-            and all(type(value) is str for value in values)
+            and len(values) == _COLUMN_COUNT
+            and set(map(type, values)) == _STR_TYPE_SET
         )
 
     @classmethod
@@ -593,155 +676,100 @@ class CutTableModel(QAbstractTableModel):
             cls._sort_key(row[COLUMN_AB_GROUP]),
         )
 
-    def _cell_background_color(self, row: int, column: int) -> QColor | None:
-        special_background = self._cached_special_count_cell_background(row, column)
-        if special_background is not None:
-            return special_background
-        if row not in self._row_background_cache:
-            self._row_background_cache[row] = self._row_background_color(row)
-        return self._row_background_cache[row]
+    def _row_style(self, row: int) -> _RowStyle:
+        """行の配色（行全体の背景/文字色と、特殊セルの上書き色）をまとめて返す。
 
-    def _cell_foreground_color(self, row: int, column: int) -> QColor | None:
-        special_foreground = self._cached_special_count_cell_foreground(row, column)
-        if special_foreground is not None:
-            return special_foreground
-        if row not in self._row_foreground_cache:
-            self._row_foreground_cache[row] = self._row_foreground_color(row)
-        return self._row_foreground_cache[row]
+        描画のたびに 1 セルあたり何度も呼ばれるため、行単位でまとめて計算して
+        キャッシュする。パレット判定もキャッシュ世代ごとに 1 回だけ行う。
+        """
 
-    def _clear_color_cache(self) -> None:
-        self._row_background_cache.clear()
-        self._row_foreground_cache.clear()
-        self._special_background_cache.clear()
-        self._special_foreground_cache.clear()
+        style = self._row_style_cache.get(row)
+        if style is None:
+            style = self._compute_row_style(row)
+            self._row_style_cache[row] = style
+        return style
 
-    def _clear_row_color_cache(self, row: int) -> None:
-        self._row_background_cache.pop(row, None)
-        self._row_foreground_cache.pop(row, None)
-        self._special_background_cache = {key: value for key, value in self._special_background_cache.items() if key[0] != row}
-        self._special_foreground_cache = {key: value for key, value in self._special_foreground_cache.items() if key[0] != row}
-
-    def _cached_special_count_cell_background(self, row: int, column: int) -> QColor | None:
-        key = (row, column)
-        if key not in self._special_background_cache:
-            self._special_background_cache[key] = self._special_count_cell_background(row, column)
-        return self._special_background_cache[key]
-
-    def _cached_special_count_cell_foreground(self, row: int, column: int) -> QColor | None:
-        key = (row, column)
-        if key not in self._special_foreground_cache:
-            self._special_foreground_cache[key] = self._special_count_cell_foreground(row, column)
-        return self._special_foreground_cache[key]
-
-    def _row_background_color(self, row: int) -> QColor | None:
-        palette = QApplication.palette()
-        base_color = self._base_row_color(row, palette)
-        status = self._rows[row][COLUMN_STATUS].strip()
-        accent_color = self._status_accent_color(status)
-        if accent_color is None:
-            return None
-        mix_ratio = self._status_mix_ratio(status, palette)
-        return self._blend_colors(base_color, accent_color, mix_ratio)
-
-    def _special_count_cell_background(self, row: int, column: int) -> QColor | None:
-        if self._is_special_count_cell(row, column):
+    def _palette_context(self) -> tuple[QPalette, bool]:
+        context = self._palette_context_cache
+        if context is None:
             palette = QApplication.palette()
-            base_color = self._base_row_color(row, palette)
-            accent_color = self._status_accent_color(STATUS_MISSING)
-            if accent_color is None:
-                return None
-            mix_ratio = self._status_mix_ratio(STATUS_MISSING, palette)
-            return self._blend_colors(base_color, accent_color, mix_ratio)
+            context = (palette, self._is_dark_palette(palette))
+            self._palette_context_cache = context
+        return context
 
-        accent_color = self._material_state_accent_color(row, column)
-        if accent_color is None:
-            return None
-        palette = QApplication.palette()
-        base_color = self._base_row_color(row, palette)
-        mix_ratio = 0.30 if self._is_dark_palette(palette) else 0.20
-        return self._blend_colors(base_color, accent_color, mix_ratio)
+    def _compute_row_style(self, row: int) -> _RowStyle:
+        palette, dark = self._palette_context()
+        values = self._rows[row]
+        base_color = self._base_row_color_for(row, palette, dark)
 
-    def _material_state_accent_color(self, row: int, column: int) -> QColor | None:
-        """TP/BG 状態セルの色。完了側は緑、未完了側はアンバーで塗り分ける。"""
+        status = values[COLUMN_STATUS].strip()
+        background = None
+        foreground = None
+        accent_color = self._status_accent_color_for(status, dark)
+        if accent_color is not None:
+            background = self._blend_colors(base_color, accent_color, self._status_mix_ratio_for(status, dark))
+            if status == STATUS_MISSING:
+                foreground = self._contrast_text_color(background, palette)
 
-        if not 0 <= row < len(self._rows):
-            return None
+        special: dict[int, tuple[QColor, QColor]] = {}
+        for column in _SPECIAL_COLOR_COLUMNS:
+            cell_background = self._special_cell_background(values, column, base_color, dark)
+            if cell_background is not None:
+                special[column] = (cell_background, self._contrast_text_color(cell_background, palette))
+        return _RowStyle(background, foreground, special)
+
+    def _special_cell_background(
+        self,
+        values: list[str],
+        column: int,
+        base_color: QColor,
+        dark: bool,
+    ) -> QColor | None:
+        value = values[column].strip()
+        if (column == COLUMN_TP_LOAD_COUNT and value == "BGOnly") or (
+            column == COLUMN_BG_LOAD_COUNT and value == "全セル"
+        ):
+            accent_color = self._status_accent_color_for(STATUS_MISSING, dark)
+            return self._blend_colors(base_color, accent_color, self._status_mix_ratio_for(STATUS_MISSING, dark))
+
         if column not in (COLUMN_TP_STATE, COLUMN_BG_STATE):
             return None
-        value = self._rows[row][column].strip()
-        accent_by_value = {
-            TP_STATE_CHECKED: QColor("#22c55e"),
-            TP_STATE_UNCHECKED: QColor("#f59e0b"),
-            BG_STATE_APPROVED: QColor("#22c55e"),
-            BG_STATE_RAW: QColor("#f59e0b"),
-        }
-        return accent_by_value.get(value)
-
-    def _row_foreground_color(self, row: int) -> QColor | None:
-        palette = QApplication.palette()
-        background = self._row_background_color(row)
-        status = self._rows[row][COLUMN_STATUS].strip()
-        if status != STATUS_MISSING or background is None:
+        accent_color = _MATERIAL_STATE_ACCENTS.get(value)
+        if accent_color is None:
             return None
-        if self._is_color_dark(background):
+        return self._blend_colors(base_color, accent_color, 0.30 if dark else 0.20)
+
+    @classmethod
+    def _contrast_text_color(cls, background: QColor, palette: QPalette) -> QColor:
+        if cls._is_color_dark(background):
             return palette.color(QPalette.ColorRole.BrightText)
         return palette.color(QPalette.ColorRole.Text)
 
-    def _special_count_cell_foreground(self, row: int, column: int) -> QColor | None:
-        background = self._special_count_cell_background(row, column)
-        if background is None:
-            return None
-        palette = QApplication.palette()
-        if self._is_color_dark(background):
-            return palette.color(QPalette.ColorRole.BrightText)
-        return palette.color(QPalette.ColorRole.Text)
+    def _clear_color_cache(self) -> None:
+        self._row_style_cache.clear()
+        self._palette_context_cache = None
 
-    def _is_special_count_cell(self, row: int, column: int) -> bool:
-        if not 0 <= row < len(self._rows):
-            return False
-        if column == COLUMN_TP_LOAD_COUNT:
-            return self._rows[row][column].strip() == "BGOnly"
-        if column == COLUMN_BG_LOAD_COUNT:
-            return self._rows[row][column].strip() == "全セル"
-        return False
+    def _clear_row_color_cache(self, row: int) -> None:
+        self._row_style_cache.pop(row, None)
 
     @staticmethod
-    def _base_row_color(row: int, palette: QPalette) -> QColor:
-        if CutTableModel._is_dark_palette(palette):
+    def _base_row_color_for(row: int, palette: QPalette, dark: bool) -> QColor:
+        if dark:
             # Reuse the docs dark palette so desktop and web mock feel consistent.
-            return QColor("#0f172a" if row % 2 == 0 else "#162033")
+            return _DARK_ROW_COLORS[row % 2]
         if row % 2 == 0:
             return palette.color(QPalette.ColorRole.Base)
-        return QColor("#f7faff")
+        return _LIGHT_ALTERNATE_ROW_COLOR
 
     @staticmethod
-    def _status_accent_color(status: str) -> QColor | None:
-        dark_mode = CutTableModel._is_dark_palette(QApplication.palette())
-        accent_by_status = (
-            {
-                STATUS_SHARED: QColor("#22c55e"),
-                STATUS_BANK: QColor("#ef4444"),
-                STATUS_MISSING: QColor("#1e3a8a"),
-            }
-            if dark_mode
-            else {
-                STATUS_SHARED: QColor("#22c55e"),
-                STATUS_BANK: QColor("#ef4444"),
-                STATUS_MISSING: QColor("#64748b"),
-            }
-        )
-        return accent_by_status.get(status)
+    def _status_accent_color_for(status: str, dark: bool) -> QColor | None:
+        return (_DARK_STATUS_ACCENTS if dark else _LIGHT_STATUS_ACCENTS).get(status)
 
     @staticmethod
-    def _status_mix_ratio(status: str, palette: QPalette) -> float:
-        if not CutTableModel._is_dark_palette(palette):
+    def _status_mix_ratio_for(status: str, dark: bool) -> float:
+        if not dark:
             return 0.28 if status == STATUS_MISSING else 0.18
-        dark_mix = {
-            STATUS_SHARED: 0.22,
-            STATUS_BANK: 0.30,
-            STATUS_MISSING: 0.50,
-        }
-        return dark_mix.get(status, 0.18)
+        return _DARK_STATUS_MIX.get(status, 0.18)
 
     @staticmethod
     def _blend_colors(base: QColor, overlay: QColor, overlay_alpha: float) -> QColor:

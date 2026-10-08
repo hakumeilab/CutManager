@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDate, QEvent, QModelIndex, QPoint, QRect, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QIcon,
     QKeySequence,
@@ -50,6 +51,17 @@ from .constants import (
     TP_LOAD_COUNT_OPTIONS,
     TP_STATE_OPTIONS,
 )
+
+_FOREGROUND_ROLE = int(Qt.ItemDataRole.ForegroundRole)
+_STATE_SELECTED = QStyle.StateFlag.State_Selected
+_CLEAR_SELECTION_AND_FOCUS = ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
+_CE_ITEM_VIEW_ITEM = QStyle.ControlElement.CE_ItemViewItem
+_DATE_COLUMNS = frozenset({COLUMN_TP_DATE, COLUMN_BG_DATE, COLUMN_DELIVERY_DATE})
+_CANDIDATE_COLUMNS = frozenset(
+    {COLUMN_STATUS, COLUMN_TP_LOAD_COUNT, COLUMN_BG_LOAD_COUNT, COLUMN_TP_STATE, COLUMN_BG_STATE}
+)
+# 右端に候補/カレンダーのアイコンを描く列。
+_ICON_COLUMNS = _DATE_COLUMNS | _CANDIDATE_COLUMNS
 
 
 class CellEditorLineEdit(QLineEdit):
@@ -140,6 +152,10 @@ class CutItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._active_editor: QWidget | None = None
+        # 編集中セルの (行, 列)。描画のたびに Qt プロパティを引かないよう保持する。
+        self._active_editor_cell: tuple[int, int] | None = None
+        # 候補/カレンダーアイコンの描画済み画像。(種類, 色, 倍率) ごとに持つ。
+        self._indicator_cache: dict[tuple[str, int, float], QPixmap] = {}
         # 縮小済みサムネイルのキャッシュ（描画のたびの再スケールを避ける）。
         self._scaled_thumbnail_cache: dict[tuple[int, int, int], QPixmap] = {}
         # 生成中に表示するスケルトンのライトスイープ用アニメーション。
@@ -191,6 +207,7 @@ class CutItemDelegate(QStyledItemDelegate):
             editor.confirmRequested.connect(lambda: self._commit_and_close(editor, move_down=True))
 
         self._active_editor = editor
+        self._active_editor_cell = (index.row(), index.column())
         editor.setProperty("_cutmanager_row", index.row())
         editor.setProperty("_cutmanager_column", index.column())
         editor.destroyed.connect(self._clear_active_editor)
@@ -290,41 +307,53 @@ class CutItemDelegate(QStyledItemDelegate):
             apply_changes(changes)
 
     def paint(self, painter, option, index) -> None:
-        if index.column() == COLUMN_THUMBNAIL:
+        column = index.column()
+        if column == COLUMN_THUMBNAIL:
             self._paint_thumbnail(painter, option, index)
             return
 
-        option_copy = type(option)(option)
+        # QStyledItemDelegate.paint() は内部で initStyleOption() をやり直し、モデルへ
+        # 同じ問い合わせを繰り返す（上書きした背景色も失われる）。ここで 1 回だけ
+        # 初期化し、スタイルの描画を直接呼ぶ。
+        option_copy = QStyleOptionViewItem(option)
         self.initStyleOption(option_copy, index)
-        indicator_option = type(option_copy)(option_copy)
+        cell_rect = QRect(option_copy.rect)
+        cell_palette = option_copy.palette
 
-        background = index.data(Qt.ItemDataRole.BackgroundRole)
-        if isinstance(background, QColor):
-            fill_color = QColor(background)
-            if option_copy.state & QStyle.StateFlag.State_Selected:
-                highlight = option_copy.palette.color(QPalette.ColorRole.Highlight)
+        background_brush = option_copy.backgroundBrush
+        if background_brush.style() != Qt.BrushStyle.NoBrush:
+            fill_color = QColor(background_brush.color())
+            if option_copy.state & _STATE_SELECTED:
+                highlight = cell_palette.color(QPalette.ColorRole.Highlight)
                 fill_color = self._blend_colors(fill_color, highlight, 0.16)
-            painter.fillRect(option_copy.rect, fill_color)
-            option_copy.backgroundBrush = QColor(fill_color)
+            painter.fillRect(cell_rect, fill_color)
+            option_copy.backgroundBrush = QBrush(fill_color)
 
-        foreground = index.data(Qt.ItemDataRole.ForegroundRole)
-        if isinstance(foreground, QColor):
-            option_copy.palette.setColor(QPalette.ColorRole.Text, foreground)
-            option_copy.palette.setColor(QPalette.ColorRole.WindowText, foreground)
-            option_copy.palette.setColor(QPalette.ColorRole.HighlightedText, foreground)
+            foreground = index.data(_FOREGROUND_ROLE)
+            if isinstance(foreground, QColor):
+                option_copy.palette.setColor(QPalette.ColorRole.Text, foreground)
+                option_copy.palette.setColor(QPalette.ColorRole.WindowText, foreground)
+                option_copy.palette.setColor(QPalette.ColorRole.HighlightedText, foreground)
 
-        option_copy.state &= ~QStyle.StateFlag.State_Selected
-        option_copy.state &= ~QStyle.StateFlag.State_HasFocus
+        option_copy.state &= _CLEAR_SELECTION_AND_FOCUS
 
-        if self._is_icon_column(index.column()) and self._is_editing_index(index):
+        icon_column = column in _ICON_COLUMNS
+        editing = icon_column and self._is_editing_index(index)
+        if editing:
             option_copy.text = ""
-        elif self._is_icon_column(index.column()):
-            option_copy.rect = option_copy.rect.adjusted(0, 0, -18, 0)
-        super().paint(painter, option_copy, index)
-        if self._is_candidate_column(index.column()) and not self._is_editing_index(index):
-            self._paint_candidate_indicator(painter, indicator_option)
-        elif self._is_date_column(index.column()) and not self._is_editing_index(index):
-            self._paint_calendar_indicator(painter, indicator_option)
+        elif icon_column:
+            option_copy.rect = cell_rect.adjusted(0, 0, -18, 0)
+
+        widget = option_copy.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(_CE_ITEM_VIEW_ITEM, option_copy, painter, widget)
+
+        if editing or not icon_column:
+            return
+        if column in _DATE_COLUMNS:
+            self._paint_calendar_indicator(painter, cell_rect, cell_palette)
+        else:
+            self._paint_candidate_indicator(painter, cell_rect, cell_palette)
 
     def sizeHint(self, option, index) -> QSize:
         # 元サムネイルが大きくても行高/列幅の推定を膨らませない（セル内に収める描画のため）。
@@ -442,15 +471,13 @@ class CutItemDelegate(QStyledItemDelegate):
 
     def _clear_active_editor(self, *_args) -> None:
         self._active_editor = None
+        self._active_editor_cell = None
 
     def _is_editing_index(self, index) -> bool:
-        if self._active_editor is None:
+        cell = self._active_editor_cell
+        if cell is None:
             return False
-        row_value = self._active_editor.property("_cutmanager_row")
-        column_value = self._active_editor.property("_cutmanager_column")
-        if row_value is None or column_value is None:
-            return False
-        return int(row_value) == index.row() and int(column_value) == index.column()
+        return cell[0] == index.row() and cell[1] == index.column()
 
     @staticmethod
     def _candidate_options(column: int) -> tuple[str, ...] | None:
@@ -484,17 +511,48 @@ class CutItemDelegate(QStyledItemDelegate):
     def _is_icon_column(cls, column: int) -> bool:
         return cls._is_candidate_column(column) or cls._is_date_column(column)
 
-    @staticmethod
-    def _paint_candidate_indicator(painter, option) -> None:
-        rect = option.rect
+    def _paint_candidate_indicator(self, painter, rect: QRect, palette: QPalette) -> None:
         if rect.width() < 18 or rect.height() < 14:
             return
+        self._draw_indicator(painter, rect, palette, "candidate")
 
-        palette = option.palette
-        icon_color = palette.color(QPalette.ColorRole.Mid)
-        center = CutItemDelegate._indicator_rect(rect).center()
+    def _paint_calendar_indicator(self, painter, rect: QRect, palette: QPalette) -> None:
+        if rect.width() < 18 or rect.height() < 14:
+            return
+        self._draw_indicator(painter, rect, palette, "calendar")
 
-        painter.save()
+    def _draw_indicator(self, painter, rect: QRect, palette: QPalette, kind: str) -> None:
+        # アイコンは表示中の全セルに描くため、線を毎回引かずに描画済みの画像を使い回す。
+        color = palette.color(QPalette.ColorRole.Mid)
+        device = painter.device()
+        ratio = device.devicePixelRatioF() if device is not None else 1.0
+        key = (kind, color.rgba(), ratio)
+        pixmap = self._indicator_cache.get(key)
+        if pixmap is None:
+            pixmap = self._render_indicator(kind, color, ratio)
+            self._indicator_cache[key] = pixmap
+        painter.drawPixmap(self._indicator_rect(rect).topLeft(), pixmap)
+
+    @classmethod
+    def _render_indicator(cls, kind: str, color: QColor, ratio: float) -> QPixmap:
+        size = cls._indicator_rect(QRect(0, 0, 32, 32)).size()
+        pixmap = QPixmap(max(1, round(size.width() * ratio)), max(1, round(size.height() * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        try:
+            local_rect = QRect(0, 0, size.width(), size.height())
+            if kind == "calendar":
+                cls._paint_calendar_icon(painter, local_rect, color)
+            else:
+                cls._paint_candidate_icon(painter, local_rect, color)
+        finally:
+            painter.end()
+        return pixmap
+
+    @staticmethod
+    def _paint_candidate_icon(painter: QPainter, icon_area: QRect, icon_color: QColor) -> None:
+        center = icon_area.center()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         pen = QPen(icon_color)
         pen.setWidth(1)
@@ -503,18 +561,10 @@ class CutItemDelegate(QStyledItemDelegate):
         painter.setPen(pen)
         painter.drawLine(center + QPoint(-3, -2), center + QPoint(0, 1))
         painter.drawLine(center + QPoint(0, 1), center + QPoint(3, -2))
-        painter.restore()
 
     @staticmethod
-    def _paint_calendar_indicator(painter, option) -> None:
-        rect = option.rect
-        if rect.width() < 18 or rect.height() < 14:
-            return
-
-        icon_rect = CutItemDelegate._indicator_rect(rect).adjusted(2, 2, -2, -2)
-        icon_color = option.palette.color(QPalette.ColorRole.Mid)
-
-        painter.save()
+    def _paint_calendar_icon(painter: QPainter, icon_area: QRect, icon_color: QColor) -> None:
+        icon_rect = icon_area.adjusted(2, 2, -2, -2)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         pen = QPen(icon_color)
         pen.setWidth(1)
@@ -524,7 +574,6 @@ class CutItemDelegate(QStyledItemDelegate):
         painter.drawLine(icon_rect.left(), icon_rect.top() + 5, icon_rect.right() - 1, icon_rect.top() + 5)
         painter.drawLine(icon_rect.left() + 3, icon_rect.top(), icon_rect.left() + 3, icon_rect.top() + 3)
         painter.drawLine(icon_rect.right() - 4, icon_rect.top(), icon_rect.right() - 4, icon_rect.top() + 3)
-        painter.restore()
 
     @staticmethod
     def _indicator_rect(cell_rect: QRect) -> QRect:

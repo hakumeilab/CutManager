@@ -44,8 +44,20 @@ class CutFilterProxyModel(QSortFilterProxyModel):
         return set(self._allowed_values_by_column)
 
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        if not self._allowed_values_by_column:
+            return True
         model = self.sourceModel()
         if model is None:
+            return True
+
+        row_at = getattr(model, "row_at", None)
+        if row_at is not None:
+            # 行数ぶん呼ばれるため、index()/data() を経由せず行の値を直接読む。
+            values = row_at(source_row)
+            for column, allowed_values in self._allowed_values_by_column.items():
+                value = "" if values is None else values[column]
+                if value not in allowed_values:
+                    return False
             return True
 
         for column, allowed_values in self._allowed_values_by_column.items():

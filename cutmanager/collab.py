@@ -21,6 +21,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,8 @@ POLL_INTERVAL_MS = 1000
 PRESENCE_INTERVAL_MS = 2000
 # この秒数だけ更新が途絶えた参加者は離席扱いにする。
 PEER_TIMEOUT_SECONDS = 12.0
+# 終了時に、裏で動いている読み書きの完了を待つ上限（秒）。
+BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 # 変更ログがこのサイズを超えたら、直近の操作だけ残して書き直す。
 OPS_FILE_MAX_BYTES = 256 * 1024
 # 書き直すときに残す操作の数。全員が 1 秒間隔で読むので、直近だけあれば足りる。
@@ -338,6 +341,132 @@ def _read_json(path: Path) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+@dataclass(frozen=True, slots=True)
+class _PollData:
+    """サイドカーから読み取った 1 回分の内容（ファイル I/O の結果だけを持つ）。"""
+
+    peers: list[PeerCursor]
+    ops: dict[str, list[dict]]
+    offsets: dict[str, int]
+
+
+def _collect_poll_data(sync_dir: Path, own_session_id: str, offsets: dict[str, int]) -> _PollData:
+    """参加者と、前回より後ろの変更ログを読む。
+
+    ファイル I/O だけを行い、セッションの状態には触れないため、ワーカースレッドから
+    呼んでもよい。NAS 越しだと 1 回の読み取りでも数十ミリ秒かかることがあるので、
+    定期ポーリングでは GUI スレッドを止めないよう裏で実行する。
+    """
+
+    peers = _read_peers(sync_dir, own_session_id)
+    new_offsets = dict(offsets)
+    ops = _read_new_peer_ops(sync_dir, own_session_id, new_offsets)
+    return _PollData(peers=peers, ops=ops, offsets=new_offsets)
+
+
+def _read_peers(sync_dir: Path, own_session_id: str) -> list[PeerCursor]:
+    peers_dir = sync_dir / PEERS_DIR_NAME
+    now = time.time()
+    peers: list[PeerCursor] = []
+    try:
+        entries = sorted(peers_dir.glob("*.json"))
+    except OSError:
+        entries = []
+
+    for entry in entries:
+        session_id = entry.stem
+        if session_id == own_session_id:
+            continue
+        payload = _read_json(entry)
+        if not payload:
+            continue
+        try:
+            updated_at = float(payload.get("ts") or 0.0)
+            column = int(payload.get("column", -1))
+        except (TypeError, ValueError):
+            continue
+        if now - updated_at > PEER_TIMEOUT_SECONDS:
+            _discard_stale_peer(entry, session_id, now - updated_at)
+            continue
+        peers.append(
+            PeerCursor(
+                session_id=session_id,
+                name=str(payload.get("name") or "名無し"),
+                color=str(payload.get("color") or peer_color(session_id)),
+                cut_number=str(payload.get("cut") or ""),
+                ab_group=str(payload.get("ab") or ""),
+                column=column,
+                updated_at=updated_at,
+            )
+        )
+
+    peers.sort(key=lambda peer: (peer.name, peer.session_id))
+    return peers
+
+
+def _discard_stale_peer(entry: Path, session_id: str, idle_seconds: float) -> None:
+    # 十分に古い置き土産だけ掃除する（時計ずれで生きている参加者を消さない）。
+    if idle_seconds < PEER_TIMEOUT_SECONDS * 10:
+        return
+    for target in (entry, entry.parent.parent / OPS_DIR_NAME / f"{session_id}{OPS_FILE_EXTENSION}"):
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _ops_entries(sync_dir: Path) -> list[Path]:
+    try:
+        return sorted((sync_dir / OPS_DIR_NAME).glob(f"*{OPS_FILE_EXTENSION}"))
+    except OSError:
+        return []
+
+
+def _read_new_peer_ops(sync_dir: Path, own_session_id: str, offsets: dict[str, int]) -> dict[str, list[dict]]:
+    """各参加者の変更ログのうち、前回読んだ位置より後ろだけを読む。
+
+    ``offsets`` は読み進めた位置で更新される。
+    """
+
+    result: dict[str, list[dict]] = {}
+    for entry in _ops_entries(sync_dir):
+        session_id = entry.stem
+        if session_id == own_session_id:
+            continue
+
+        offset = offsets.get(session_id, 0)
+        size = _file_size(entry)
+        if size == offset:
+            # 追記が無いので読み込み自体を省く。待機中はここで終わる。
+            continue
+        if size < offset:
+            # ログが書き直された。先頭から読み直し、seq で二重取り込みを防ぐ。
+            offset = 0
+
+        lines, consumed_bytes = _read_lines_from(entry, offset)
+        offsets[session_id] = offset + consumed_bytes
+        if not lines:
+            continue
+
+        ops: list[dict] = []
+        for line in lines:
+            try:
+                operation = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(operation, dict):
+                continue
+            try:
+                if int(operation.get("version", 0)) != PROTOCOL_VERSION:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            ops.append(operation)
+        if ops:
+            result[session_id] = ops
+    return result
+
+
 class CollabSession(QObject):
     """サイドカー経由でプロジェクトを共同編集するセッション。"""
 
@@ -345,6 +474,9 @@ class CollabSession(QObject):
     remoteDiffReceived = Signal(object)
     statusChanged = Signal(str)
     failed = Signal(str)
+    # ワーカースレッドからの完了通知（GUI スレッドへキュー経由で届く）。
+    _backgroundPollFinished = Signal(int, object)
+    _backgroundFailed = Signal(int, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -363,10 +495,21 @@ class CollabSession(QObject):
         self._cursor: tuple[str, str, int] = ("", "", -1)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_INTERVAL_MS)
-        self._poll_timer.timeout.connect(self.poll)
+        self._poll_timer.timeout.connect(self._poll_in_background)
         self._presence_timer = QTimer(self)
         self._presence_timer.setInterval(PRESENCE_INTERVAL_MS)
-        self._presence_timer.timeout.connect(self._publish_presence)
+        self._presence_timer.timeout.connect(self._publish_presence_in_background)
+
+        # 定期的な NAS の読み書きは 1 本のワーカースレッドで順番に行う。
+        # 順番が保たれるので、在席情報の書き込みと削除が前後することもない。
+        self._executor: ThreadPoolExecutor | None = None
+        self._last_background_job: Future | None = None
+        self._poll_in_flight = False
+        self._presence_in_flight = False
+        # start/stop や同期 poll() のたびに進め、古い裏処理の結果を捨てるための世代番号。
+        self._generation = 0
+        self._backgroundPollFinished.connect(self._on_background_poll_finished)
+        self._backgroundFailed.connect(self._on_background_failed)
 
     # ------------------------------------------------------------------ 状態
 
@@ -408,6 +551,7 @@ class CollabSession(QObject):
         self._offsets = {}
         self._peers = []
         self._active = True
+        self._generation += 1
 
         # 既に置かれている変更ログは「参加より前の履歴」なので、末尾から読み始める。
         for entry in self._ops_entries():
@@ -432,6 +576,9 @@ class CollabSession(QObject):
             return
         self._poll_timer.stop()
         self._presence_timer.stop()
+        self._generation += 1
+        # 裏で書きかけの在席情報が、削除の後から復活しないように待つ。
+        self._wait_for_background_jobs()
         self._remove_own_presence()
         self._active = False
         self._file_path = None
@@ -530,16 +677,57 @@ class CollabSession(QObject):
     # ------------------------------------------------------------------ 受信
 
     def poll(self) -> None:
+        """サイドカーを読み、参加者と他者の変更を取り込む（呼び出し元で同期実行）。"""
+
         if not self._active or self._sync_dir is None:
             return
+        # 裏で読み取り中の結果は、ここで読む内容より古くなるので捨てる。
+        self._generation += 1
+        self._apply_poll_data(_collect_poll_data(self._sync_dir, self.session_id, self._offsets))
 
-        self._refresh_peers()
+    def _poll_in_background(self) -> None:
+        """定期ポーリング。NAS の読み取りをワーカースレッドで行い GUI を止めない。"""
+
+        if not self._active or self._sync_dir is None or self._poll_in_flight:
+            return
+        self._poll_in_flight = True
+        generation = self._generation
+        sync_dir = self._sync_dir
+        session_id = self.session_id
+        offsets = dict(self._offsets)
+
+        def job() -> None:
+            try:
+                data = _collect_poll_data(sync_dir, session_id, offsets)
+            except Exception as exc:  # pragma: no cover - 想定外の失敗でも次回に持ち越す
+                self._backgroundFailed.emit(generation, f"共有フォルダーを読めませんでした: {exc}")
+                data = None
+            self._backgroundPollFinished.emit(generation, data)
+
+        if not self._submit_background(job):
+            self._poll_in_flight = False
+
+    def _on_background_poll_finished(self, generation: int, data) -> None:
+        self._poll_in_flight = False
+        if data is None or generation != self._generation or not self._active:
+            return
+        self._apply_poll_data(data)
+
+    def _on_background_failed(self, generation: int, message: str) -> None:
+        if generation == self._generation and self._active:
+            self.failed.emit(message)
+
+    def _apply_poll_data(self, data: _PollData) -> None:
+        self._offsets = data.offsets
+        if data.peers != self._peers:
+            self._peers = list(data.peers)
+            self.peersChanged.emit(list(data.peers))
 
         merged_cells: dict[RowKey, dict[int, str]] = {}
         merged_added: dict[RowKey, list[str]] = {}
         merged_removed: list[RowKey] = []
 
-        for session_id, ops in self._read_new_peer_ops().items():
+        for session_id, ops in data.ops.items():
             last_seen = self._consumed.get(session_id, 0)
             highest = last_seen
             for op in sorted(ops, key=lambda item: int(item.get("seq", 0))):
@@ -567,6 +755,23 @@ class CollabSession(QObject):
 
     # ---------------------------------------------------------------- 内部処理
 
+    def _submit_background(self, job) -> bool:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cutmanager-collab")
+        try:
+            self._last_background_job = self._executor.submit(job)
+        except RuntimeError:  # pragma: no cover - 終了処理中
+            return False
+        return True
+
+    def _wait_for_background_jobs(self) -> None:
+        job = self._last_background_job
+        if job is not None and not job.done():
+            # ワーカーは 1 本なので、最後に積んだ処理が終われば全部終わっている。
+            wait([job], timeout=BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS)
+        self._poll_in_flight = False
+        self._presence_in_flight = False
+
     def _ops_path(self, session_id: str | None = None) -> Path:
         assert self._sync_dir is not None
         name = session_id or self.session_id
@@ -575,116 +780,51 @@ class CollabSession(QObject):
     def _ops_entries(self) -> list[Path]:
         if self._sync_dir is None:
             return []
-        try:
-            return sorted((self._sync_dir / OPS_DIR_NAME).glob(f"*{OPS_FILE_EXTENSION}"))
-        except OSError:
-            return []
+        return _ops_entries(self._sync_dir)
 
-    def _read_new_peer_ops(self) -> dict[str, list[dict]]:
-        """各参加者の変更ログのうち、前回読んだ位置より後ろだけを読む。"""
+    def _presence_path(self) -> Path:
+        assert self._sync_dir is not None
+        return self._sync_dir / PEERS_DIR_NAME / f"{self.session_id}.json"
 
-        result: dict[str, list[dict]] = {}
-        for entry in self._ops_entries():
-            session_id = entry.stem
-            if session_id == self.session_id:
-                continue
+    def _presence_payload(self) -> dict:
+        cut_number, ab_group, column = self._cursor
+        return {
+            "version": PROTOCOL_VERSION,
+            "session": self.session_id,
+            "name": self._display_name,
+            "color": self.color(),
+            "cut": cut_number,
+            "ab": ab_group,
+            "column": column,
+            "ts": time.time(),
+        }
 
-            offset = self._offsets.get(session_id, 0)
-            size = _file_size(entry)
-            if size == offset:
-                # 追記が無いので読み込み自体を省く。待機中はここで終わる。
-                continue
-            if size < offset:
-                # ログが書き直された。先頭から読み直し、seq で二重取り込みを防ぐ。
-                offset = 0
+    def _publish_presence_in_background(self) -> None:
+        """定期的な在席情報の更新。書き込みはワーカースレッドで行う。"""
 
-            lines, consumed_bytes = _read_lines_from(entry, offset)
-            self._offsets[session_id] = offset + consumed_bytes
-            if not lines:
-                continue
-
-            ops: list[dict] = []
-            for line in lines:
-                try:
-                    operation = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(operation, dict):
-                    continue
-                if int(operation.get("version", 0)) != PROTOCOL_VERSION:
-                    continue
-                ops.append(operation)
-            if ops:
-                result[session_id] = ops
-        return result
-
-    def _refresh_peers(self) -> None:
-        if self._sync_dir is None:
+        if not self._active or self._sync_dir is None or self._presence_in_flight:
             return
-        peers_dir = self._sync_dir / PEERS_DIR_NAME
-        now = time.time()
-        peers: list[PeerCursor] = []
-        try:
-            entries = sorted(peers_dir.glob("*.json"))
-        except OSError:
-            entries = []
+        self._presence_in_flight = True
+        generation = self._generation
+        path = self._presence_path()
+        payload = self._presence_payload()
 
-        for entry in entries:
-            session_id = entry.stem
-            if session_id == self.session_id:
-                continue
-            payload = _read_json(entry)
-            if not payload:
-                continue
-            updated_at = float(payload.get("ts") or 0.0)
-            if now - updated_at > PEER_TIMEOUT_SECONDS:
-                self._discard_stale_peer(entry, session_id, now - updated_at)
-                continue
-            peers.append(
-                PeerCursor(
-                    session_id=session_id,
-                    name=str(payload.get("name") or "名無し"),
-                    color=str(payload.get("color") or peer_color(session_id)),
-                    cut_number=str(payload.get("cut") or ""),
-                    ab_group=str(payload.get("ab") or ""),
-                    column=int(payload.get("column", -1)),
-                    updated_at=updated_at,
-                )
-            )
-
-        peers.sort(key=lambda peer: (peer.name, peer.session_id))
-        if peers != self._peers:
-            self._peers = peers
-            self.peersChanged.emit(list(peers))
-
-    def _discard_stale_peer(self, entry: Path, session_id: str, idle_seconds: float) -> None:
-        # 十分に古い置き土産だけ掃除する（時計ずれで生きている参加者を消さない）。
-        if idle_seconds < PEER_TIMEOUT_SECONDS * 10:
-            return
-        for target in (entry, entry.parent.parent / OPS_DIR_NAME / f"{session_id}{OPS_FILE_EXTENSION}"):
+        def job() -> None:
             try:
-                target.unlink(missing_ok=True)
-            except OSError:
-                pass
+                _write_json_atomic(path, payload)
+            except OSError as exc:
+                self._backgroundFailed.emit(generation, f"在席情報を共有できませんでした: {exc}")
+            finally:
+                self._presence_in_flight = False
+
+        if not self._submit_background(job):
+            self._presence_in_flight = False
 
     def _publish_presence(self) -> None:
         if not self._active or self._sync_dir is None:
             return
-        cut_number, ab_group, column = self._cursor
         try:
-            _write_json_atomic(
-                self._sync_dir / PEERS_DIR_NAME / f"{self.session_id}.json",
-                {
-                    "version": PROTOCOL_VERSION,
-                    "session": self.session_id,
-                    "name": self._display_name,
-                    "color": self.color(),
-                    "cut": cut_number,
-                    "ab": ab_group,
-                    "column": column,
-                    "ts": time.time(),
-                },
-            )
+            _write_json_atomic(self._presence_path(), self._presence_payload())
         except OSError as exc:
             self.failed.emit(f"在席情報を共有できませんでした: {exc}")
 

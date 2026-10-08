@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -300,6 +301,64 @@ class CollabSessionTest(unittest.TestCase):
         self.alice.publish_rows(edited)
         self.bob.poll()
         self.assertEqual(received_by_bob, [])
+
+    def _wait_for(self, condition, timeout: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        app = _app()
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if condition():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_background_poll_delivers_changes_and_peers(self) -> None:
+        rows = [_row("001")]
+        self.alice.start(self.file_path, "アリス", rows)
+        self.bob.start(self.file_path, "ボブ", rows)
+        received = self._received(self.bob)
+
+        edited = [list(row) for row in rows]
+        edited[0][COLUMN_MEMO] = "裏で読む"
+        self.alice.publish_rows(edited)
+        # 定期ポーリングは読み取りをワーカースレッドで行い、結果だけを後から取り込む。
+        self.bob._poll_in_background()
+
+        self.assertTrue(self._wait_for(lambda: len(received) == 1))
+        self.assertEqual(received[0].cells, {_key("001"): {COLUMN_MEMO: "裏で読む"}})
+        self.assertEqual([peer.name for peer in self.bob.peers()], ["アリス"])
+
+        # 読み進めた位置が記録され、同じ変更を二度取り込まない。
+        self.bob._poll_in_background()
+        self.assertTrue(self._wait_for(lambda: not self.bob._poll_in_flight))
+        self.assertEqual(len(received), 1)
+
+    def test_background_result_after_stop_is_ignored(self) -> None:
+        rows = [_row("001")]
+        self.alice.start(self.file_path, "アリス", rows)
+        self.bob.start(self.file_path, "ボブ", rows)
+        received = self._received(self.bob)
+
+        edited = [list(row) for row in rows]
+        edited[0][COLUMN_MEMO] = "停止後"
+        self.alice.publish_rows(edited)
+        self.bob._poll_in_background()
+        self.bob.stop()
+        self._wait_for(lambda: False, timeout=0.2)
+
+        self.assertEqual(received, [])
+
+    def test_background_presence_is_not_resurrected_after_stop(self) -> None:
+        rows = [_row("001")]
+        self.alice.start(self.file_path, "アリス", rows)
+        self.bob.start(self.file_path, "ボブ", rows)
+
+        self.alice._publish_presence_in_background()
+        self.alice.stop()
+        self._wait_for(lambda: False, timeout=0.2)
+
+        self.bob.poll()
+        self.assertEqual(self.bob.peers(), [])
 
 
 if __name__ == "__main__":

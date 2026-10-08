@@ -79,7 +79,7 @@ from .csv_io import CsvLoadError, load_csv_file, save_csv_file
 from .filter_popup import ColumnFilterPopup
 from .folder_import import apply_material_updates, build_rows_from_dropped_folders
 from .history import HistoryManager
-from .model import CutTableModel, NON_DATA_COLUMNS
+from .model import CutTableModel, NON_DATA_COLUMNS, READONLY_COLUMNS
 from .proxy import CutFilterProxyModel
 from .thumbnails import ThumbnailProvider
 from .settings_dialog import SettingsDialog
@@ -258,6 +258,10 @@ class MainWindow(QMainWindow):
     COLLAB_AUTOSAVE_DELAY_MS = 3000
     # 進捗リボンは全行を数え直すため、連続入力中は間引いて更新する。
     SUMMARY_REFRESH_DELAY_MS = 250
+    # 選択セルの共有は NAS へ書き込むため、矢印キーで移動している間は間引く。
+    COLLAB_CURSOR_PUBLISH_DELAY_MS = 150
+    # メモは 1 文字ごとに設定ファイルへ書き出さず、入力が落ち着いてから保存する。
+    MEMO_SAVE_DELAY_MS = 500
     DEFAULT_UNDO_LIMIT = 100
 
     def __init__(self) -> None:
@@ -306,6 +310,15 @@ class MainWindow(QMainWindow):
         self._collab_autosave_timer.setSingleShot(True)
         self._collab_autosave_timer.setInterval(self.COLLAB_AUTOSAVE_DELAY_MS)
         self._collab_autosave_timer.timeout.connect(self._collab_autosave)
+        self._collab_cursor_timer = QTimer(self)
+        self._collab_cursor_timer.setSingleShot(True)
+        self._collab_cursor_timer.setInterval(self.COLLAB_CURSOR_PUBLISH_DELAY_MS)
+        self._collab_cursor_timer.timeout.connect(self._publish_local_cursor)
+        self._memo_save_timer = QTimer(self)
+        self._memo_save_timer.setSingleShot(True)
+        self._memo_save_timer.setInterval(self.MEMO_SAVE_DELAY_MS)
+        self._memo_save_timer.timeout.connect(self._flush_summary_memo)
+        self._pending_memo: tuple[str, str] | None = None
 
         self.table_view = CutTableView(self)
         self.drop_hint_label = QLabel(self)
@@ -668,7 +681,7 @@ class MainWindow(QMainWindow):
         self.proxy_model.layoutChanged.connect(self._refresh_remote_cursors)
         selection_model = self.table_view.selectionModel()
         if selection_model is not None:
-            selection_model.currentChanged.connect(self._publish_local_cursor)
+            selection_model.currentChanged.connect(lambda *_: self._collab_cursor_timer.start())
         self.collab.remoteDiffReceived.connect(self._apply_remote_diff)
         self.collab.peersChanged.connect(self._on_collab_peers_changed)
         self.collab.statusChanged.connect(lambda message: self.statusBar().showMessage(message, 4000))
@@ -883,10 +896,22 @@ class MainWindow(QMainWindow):
     def _commit_summary_memo(self) -> None:
         if self._updating_summary_memo or self.summary_memo_edit is None:
             return
-        self.settings.setValue(self._episode_memo_key(), self.summary_memo_edit.toPlainText())
+        # 保存先のキーは入力した時点のファイルに結び付けておく。
+        self._pending_memo = (self._episode_memo_key(), self.summary_memo_edit.toPlainText())
+        self._memo_save_timer.start()
+
+    def _flush_summary_memo(self) -> None:
+        self._memo_save_timer.stop()
+        if self._pending_memo is None:
+            return
+        key, memo = self._pending_memo
+        self._pending_memo = None
+        self.settings.setValue(key, memo)
         self.settings.sync()
 
     def _load_episode_memo(self) -> str:
+        # 保存待ちのメモがあれば先に書き出し、古い内容で上書きしないようにする。
+        self._flush_summary_memo()
         value = self.settings.value(self._episode_memo_key(), "")
         return "" if value is None else str(value)
 
@@ -1059,18 +1084,20 @@ class MainWindow(QMainWindow):
             self._syncing_section_size = False
 
     def _selected_columns(self) -> set[int]:
-        return {
-            index.column()
-            for index in self.table_view.selectionModel().selectedIndexes()
-            if index.isValid()
-        }
+        # 列幅を動かしている間は何度も呼ばれる。選択セルを 1 つずつ数えず、
+        # 選択範囲（矩形）の端だけを見る。
+        columns: set[int] = set()
+        for selection_range in self.table_view.selectionModel().selection():
+            if selection_range.isValid():
+                columns.update(range(selection_range.left(), selection_range.right() + 1))
+        return columns
 
     def _selected_rows(self) -> set[int]:
-        return {
-            index.row()
-            for index in self.table_view.selectionModel().selectedIndexes()
-            if index.isValid()
-        }
+        rows: set[int] = set()
+        for selection_range in self.table_view.selectionModel().selection():
+            if selection_range.isValid():
+                rows.update(range(selection_range.top(), selection_range.bottom() + 1))
+        return rows
 
     def _on_column_visibility_toggled(self, column: int, visible: bool) -> None:
         self.table_view.setColumnHidden(column, not visible)
@@ -1422,12 +1449,23 @@ class MainWindow(QMainWindow):
 
         selected_indexes = [index for index in self.table_view.selectionModel().selectedIndexes() if index.isValid()]
         if len(matrix) == 1 and len(matrix[0]) == 1 and len(selected_indexes) > 1:
-            pasted_cells = 0
+            value = matrix[0][0]
+            actual_rows = self.model.actual_row_count()
+            changes: list[tuple[int, int, str]] = []
+            virtual_indexes = []
             for proxy_index in selected_indexes:
                 source_index = self.proxy_model.mapToSource(proxy_index)
-                if not source_index.isValid():
+                if not source_index.isValid() or source_index.column() in READONLY_COLUMNS:
                     continue
-                if self.model.setData(source_index, matrix[0][0], Qt.ItemDataRole.EditRole):
+                if source_index.row() >= actual_rows:
+                    # 末尾の空行（仮想行）は行の追加を伴うので 1 セルずつ入れる。
+                    virtual_indexes.append(source_index)
+                    continue
+                changes.append((source_index.row(), source_index.column(), value))
+            # 1 セルずつ書くと Undo も 1 セルずつになるため、1 回の操作にまとめる。
+            pasted_cells = self.model.apply_cell_changes(changes)
+            for source_index in virtual_indexes:
+                if self.model.setData(source_index, value, Qt.ItemDataRole.EditRole):
                     pasted_cells += 1
             if pasted_cells:
                 self.statusBar().showMessage(f"{pasted_cells} セルに貼り付けました。", 3000)
@@ -2353,6 +2391,7 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._flush_summary_memo()
         if self._skip_close_confirmation:
             self._stop_collaboration(remember=False)
             event.accept()

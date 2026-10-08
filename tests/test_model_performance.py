@@ -161,6 +161,29 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(proxy.rowCount(), 3)
 
 
+class SelectedColorTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _app()
+
+    def test_selected_colored_cell_is_clearly_distinguishable(self) -> None:
+        from PySide6.QtGui import QColor, QPalette
+
+        from cutmanager.view import CutItemDelegate
+
+        background = QColor("#d6f1e1")  # 兼用の行
+        selected = CutItemDelegate._selected_fill_color(background, QPalette(QColor("#ffffff")))
+        difference = sum(
+            abs(a - b)
+            for a, b in zip(
+                (background.red(), background.green(), background.blue()),
+                (selected.red(), selected.green(), selected.blue()),
+            )
+        )
+        # 選択色が淡く混ざるだけで見分けられない状態に戻っていないこと。
+        self.assertGreater(difference, 60)
+        self.assertGreater(selected.blue(), selected.green() - 40)
+
+
 class MainWindowEditingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.app = _app()

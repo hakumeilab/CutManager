@@ -56,6 +56,9 @@ _FOREGROUND_ROLE = int(Qt.ItemDataRole.ForegroundRole)
 _STATE_SELECTED = QStyle.StateFlag.State_Selected
 _CLEAR_SELECTION_AND_FOCUS = ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
 _CE_ITEM_VIEW_ITEM = QStyle.ControlElement.CE_ItemViewItem
+# 色付き行を選択したときに混ぜる強調色（画面全体のテーマの強調色と同じ）。
+_SELECTION_ACCENT_LIGHT = QColor("#2563eb")
+_SELECTION_ACCENT_DARK = QColor("#3b82f6")
 _DATE_COLUMNS = frozenset({COLUMN_TP_DATE, COLUMN_BG_DATE, COLUMN_DELIVERY_DATE})
 _CANDIDATE_COLUMNS = frozenset(
     {COLUMN_STATUS, COLUMN_TP_LOAD_COUNT, COLUMN_BG_LOAD_COUNT, COLUMN_TP_STATE, COLUMN_BG_STATE}
@@ -324,8 +327,9 @@ class CutItemDelegate(QStyledItemDelegate):
         if background_brush.style() != Qt.BrushStyle.NoBrush:
             fill_color = QColor(background_brush.color())
             if option_copy.state & _STATE_SELECTED:
-                highlight = cell_palette.color(QPalette.ColorRole.Highlight)
-                fill_color = self._blend_colors(fill_color, highlight, 0.16)
+                # パレットの Highlight はスタイルシートの淡い選択色になっており、
+                # 色付き行に薄く混ぜても選択が見えない。テーマの強調色をはっきり混ぜる。
+                fill_color = self._selected_fill_color(fill_color, cell_palette)
             painter.fillRect(cell_rect, fill_color)
             option_copy.backgroundBrush = QBrush(fill_color)
 
@@ -354,6 +358,14 @@ class CutItemDelegate(QStyledItemDelegate):
             self._paint_calendar_indicator(painter, cell_rect, cell_palette)
         else:
             self._paint_candidate_indicator(painter, cell_rect, cell_palette)
+
+    @classmethod
+    def _selected_fill_color(cls, background: QColor, palette: QPalette) -> QColor:
+        base = palette.color(QPalette.ColorRole.Base)
+        dark = (0.299 * base.red() + 0.587 * base.green() + 0.114 * base.blue()) < 128
+        if dark:
+            return cls._blend_colors(background, _SELECTION_ACCENT_DARK, 0.40)
+        return cls._blend_colors(background, _SELECTION_ACCENT_LIGHT, 0.30)
 
     def sizeHint(self, option, index) -> QSize:
         # 元サムネイルが大きくても行高/列幅の推定を膨らませない（セル内に収める描画のため）。

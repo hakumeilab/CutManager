@@ -250,7 +250,10 @@ try {
     $specContent = Get-Content -LiteralPath $specTemplatePath
     $normalizedIconPath = if (Test-Path -LiteralPath $defaultIconPath) { $defaultIconPath } else { "" }
     $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "title" -Value "CutManager"
-    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "project_dir" -Value "."
+    # spec は一時フォルダーに置くため、project_dir は絶対パスで渡す。
+    # PySide6 6.12 以降は project_dir を spec の場所から解決し、生成物の掃除先が
+    # その外にあると中断するため、"." だと一時フォルダーを指して失敗する。
+    $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "project_dir" -Value $repoRoot
     $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "input_file" -Value "main.py"
     $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "exec_directory" -Value "."
     $specContent = Set-SpecValue -Lines $specContent -Section "app" -Key "icon" -Value $normalizedIconPath

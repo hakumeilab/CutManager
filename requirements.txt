@@ -1,7 +1,1 @@
-# PySide6 6.12 は Qt のプラグインを PySide6/Qt/plugins へ移したため、
-# pysidedeploy.spec が固定している Nuitka 2.7.11 で固めた exe が
-# 「no Qt platform plugin could be initialized」で起動できなくなる。
-# （Nuitka が埋め込む QtCore の起動後コードが 6.12 では失敗し、
-#   qt-plugins へのプラグインパス設定が行われないため）
-# Nuitka 側の対応版へ上げるまでは 6.12 未満に固定する。
-PySide6>=6.7,<6.12
+PySide6>=6.7

@@ -4,7 +4,7 @@
 
 ### 修正
 
-- Windows 版の exe が「no Qt platform plugin could be initialized」と表示して起動しない問題を修正。ビルドに使う PySide6 を 6.12 未満に固定しました（6.12 で Qt プラグインの配置が変わり、同梱している Nuitka 2.7.11 がプラグインパスを設定できなくなっていたため）
+- Windows 版の exe が「no Qt platform plugin could be initialized」と表示して起動しない問題を修正。PySide6 6.12 で Qt プラグインの配置が変わり、ビルドに使っていた Nuitka 2.7.11 がプラグインパスを設定できなくなっていたため、Nuitka を 4.3.5 に更新しました
 
 ## 0.4.2 - 2026-10-08
 

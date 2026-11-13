@@ -24,7 +24,7 @@ icon = assets/cutmanager_icon.ico
 python_path =
 
 # python packages to install
-packages = Nuitka==2.7.11
+packages = Nuitka[onefile]==4.3.5
 
 # buildozer = for deploying Android application
 android_packages = buildozer==1.5.0,cython==0.29.33
